@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI切片神器</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="app">
+    <section class="panel setup">
+      <div>
+        <h1>AI切片神器</h1>
+        <p>自动识别高光片段，生成短视频。</p>
+      </div>
+      <label class="field">
+        <span>视频路径</span>
+        <span class="pathPicker">
+          <input id="videoPath" placeholder="请选择视频文件">
+          <button id="pickVideoBtn" type="button">选择视频</button>
+        </span>
+      </label>
+      <div class="actions">
+        <button id="thumbBtn">生成缩略图</button>
+        <button id="autoBtn">识别高光</button>
+        <button id="aiAutoBtn">AI识别高光</button>
+        <button id="settingsBtn" class="iconBtn" type="button" title="设置" aria-label="设置">⚙</button>
+      </div>
+      <div id="taskProgress" class="progressWrap" hidden>
+        <div class="progressText">
+          <span id="taskMessage">准备开始</span>
+          <span class="progressActions">
+            <strong id="taskPercent">0%</strong>
+            <button id="cancelTaskBtn" class="cancelTaskBtn" type="button" hidden>终止</button>
+          </span>
+        </div>
+        <div class="progressBar"><span id="taskBar"></span></div>
+      </div>
+      <div id="info" class="infoBox">等待读取视频。</div>
+    </section>
+
+    <section class="workspace">
+      <aside class="panel timeline">
+        <div class="sectionHead">
+          <h2>片段列表</h2>
+          <button id="addClipBtn" title="添加片段">+</button>
+        </div>
+        <label class="target">
+          <span>目标时长</span>
+          <input id="targetSeconds" type="number" min="30" max="600" value="180">
+          <span>秒</span>
+        </label>
+        <div id="autoSummary" class="note"></div>
+        <div id="clips"></div>
+        <div class="summary">
+          <span>总时长</span>
+          <strong id="totalDuration">00:00</strong>
+        </div>
+        <label class="field exportDir">
+          <span>导出目录</span>
+          <span class="pathPicker">
+            <input id="outputDir" placeholder="默认保存到工具 exports 目录">
+            <button id="pickDirBtn" type="button">选择目录</button>
+          </span>
+        </label>
+        <div class="exportActions">
+          <button id="exportSegmentsBtn" type="button">导出片段</button>
+          <button id="exportBtn" class="primary">导出成片</button>
+        </div>
+        <div id="exportResult"></div>
+      </aside>
+
+      <section class="panel thumbs">
+        <div class="sectionHead">
+          <h2>缩略图总览</h2>
+          <label class="inline">
+            <span>间隔</span>
+            <input id="interval" type="number" min="3" max="30" value="10">
+            <span>秒</span>
+          </label>
+        </div>
+        <div id="thumbGrid" class="grid empty">点击“生成缩略图”后在这里选点。</div>
+      </section>
+    </section>
+  </main>
+
+  <div id="settingsModal" class="modal" hidden>
+    <div class="modalPanel">
+      <div class="sectionHead">
+        <h2>设置</h2>
+        <button id="closeSettingsBtn" class="iconBtn" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div id="setupHint" class="setupHint" hidden></div>
+      <div class="settingsGrid">
+        <label class="field">
+          <span>火山方舟 API Key</span>
+          <input id="arkApiKey" type="password" placeholder="仅保存在本机配置文件中">
+        </label>
+        <label class="field">
+          <span>ffmpeg 路径</span>
+          <span class="pathPicker">
+            <input id="ffmpegPath" placeholder="留空则自动检测 PATH / 常见安装路径">
+            <button id="pickFfmpegBtn" type="button">选择</button>
+          </span>
+        </label>
+      </div>
+      <div class="settingsActions">
+        <button id="saveConfigBtn" type="button">保存设置</button>
+        <span id="configState" class="configState">未读取</span>
+      </div>
+      <div id="ffmpegDetected" class="detectedText"></div>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
