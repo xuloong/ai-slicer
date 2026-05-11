@@ -43,9 +43,9 @@ CONFIG_FILE = DATA_DIR / "user_config.json"
 ARK_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 ARK_MODEL = "doubao-seed-2-0-pro-260215"
 FFMPEG_CANDIDATES = [
-    "/Applications/QQBrowser.app/Contents/Frameworks/QQBrowser Framework.framework/Versions/21.0.6.203/FFmpeg/bin/ffmpeg",
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
+    "/Applications/QQBrowser.app/Contents/Frameworks/QQBrowser Framework.framework/Versions/21.0.6.203/FFmpeg/bin/ffmpeg",
     "C:/ffmpeg/bin/ffmpeg.exe",
 ]
 
@@ -1002,57 +1002,75 @@ def make_swift_export(input_path: Path, output_path: Path, clips: list[dict]) ->
 
 
 def export_with_ffmpeg(input_path: Path, output_path: Path, clips: list[dict]) -> None:
-    temp_dir = Path(tempfile.mkdtemp(prefix="highlight_export_"))
-    part_paths = []
-    try:
-        for index, clip in enumerate(clips, start=1):
-            start = float(clip["start"])
-            duration = float(clip["duration"])
-            if duration <= 0:
-                continue
-            part = temp_dir / f"part_{index:03d}.mp4"
-            result = run([
-                ffmpeg_path(), "-hide_banner", "-y",
-                "-ss", f"{start:.3f}", "-i", str(input_path),
-                "-t", f"{duration:.3f}",
-                "-map", "0:v:0", "-map", "0:a:0?",
-                "-c", "copy", "-avoid_negative_ts", "make_zero",
-                str(part),
-            ], timeout=240)
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or result.stdout)[-1500:])
-            part_paths.append(part)
-        if not part_paths:
-            raise RuntimeError("至少需要一个有效片段。")
+    valid_clips = [
+        {
+            "start": max(0.0, float(clip.get("start", 0))),
+            "duration": float(clip.get("duration", 0)),
+        }
+        for clip in clips
+        if float(clip.get("duration", 0)) > 0
+    ]
+    if not valid_clips:
+        raise RuntimeError("至少需要一个有效片段。")
 
-        list_file = temp_dir / "concat.txt"
-        list_file.write_text(
-            "\n".join(f"file '{path.as_posix().replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for path in part_paths),
-            encoding="utf-8",
-        )
-        concat = run([
+    if len(valid_clips) == 1:
+        clip = valid_clips[0]
+        result = run([
             ffmpeg_path(), "-hide_banner", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(list_file),
-            "-c", "copy", "-movflags", "+faststart",
+            "-ss", f"{clip['start']:.3f}", "-i", str(input_path),
+            "-t", f"{clip['duration']:.3f}",
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c", "copy", "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
             str(output_path),
-        ], timeout=240)
-        if concat.returncode != 0:
-            raise RuntimeError((concat.stderr or concat.stdout)[-1500:])
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        ], timeout=None)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout)[-1500:])
+        return
+
+    errors = []
+    for include_audio in (True, False):
+        command = [ffmpeg_path(), "-hide_banner", "-y"]
+        for clip in valid_clips:
+            command.extend([
+                "-ss", f"{clip['start']:.3f}",
+                "-t", f"{clip['duration']:.3f}",
+                "-i", str(input_path),
+            ])
+
+        chains = []
+        pieces = []
+        for index in range(len(valid_clips)):
+            chains.append(f"[{index}:v:0]setpts=PTS-STARTPTS[v{index}]")
+            pieces.append(f"[v{index}]")
+            if include_audio:
+                chains.append(f"[{index}:a:0]asetpts=PTS-STARTPTS[a{index}]")
+                pieces.append(f"[a{index}]")
+        chains.append(f"{''.join(pieces)}concat=n={len(valid_clips)}:v=1:a={1 if include_audio else 0}[v]{'[a]' if include_audio else ''}")
+
+        command.extend(["-filter_complex", ";".join(chains), "-map", "[v]"])
+        if include_audio:
+            command.extend(["-map", "[a]"])
+        command.extend([
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+        ])
+        if include_audio:
+            command.extend(["-c:a", "aac", "-b:a", "160k"])
+        else:
+            command.append("-an")
+        command.extend(["-movflags", "+faststart", str(output_path)])
+
+        result = run(command, timeout=None)
+        if result.returncode == 0:
+            return
+        errors.append((result.stderr or result.stdout)[-1500:])
+
+    raise RuntimeError(errors[-1] if errors else "导出失败。")
 
 
 def export_video(input_path: Path, output_path: Path, clips: list[dict]) -> None:
-    if is_macos():
-        script = Path(tempfile.gettempdir()) / f"highlight_export_{uuid.uuid4().hex}.swift"
-        script.write_text(make_swift_export(input_path, output_path, clips), encoding="utf-8")
-        env = os.environ.copy()
-        env["CLANG_MODULE_CACHE_PATH"] = str(WORK / ".clang-cache")
-        result = subprocess.run(["swift", str(script)], text=True, capture_output=True, env=env, timeout=240)
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout)[-1500:])
-    else:
-        export_with_ffmpeg(input_path, output_path, clips)
+    export_with_ffmpeg(input_path, output_path, clips)
 
 
 def export_clip_segments(input_path: Path, output_dir: Path, clips: list[dict]) -> list[dict]:
