@@ -7,6 +7,7 @@ import re
 import base64
 import statistics
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from PIL import Image, ImageChops, ImageStat
+
+try:
+    import certifi
+except Exception:
+    certifi = None
+
+try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None
 
 DEV_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", DEV_ROOT))
@@ -85,6 +96,13 @@ def public_config() -> dict:
 
 
 def detect_ffmpeg_path() -> str | None:
+    if imageio_ffmpeg is not None:
+        try:
+            bundled = imageio_ffmpeg.get_ffmpeg_exe()
+            if bundled and Path(bundled).exists():
+                return bundled
+        except Exception:
+            pass
     for candidate in FFMPEG_CANDIDATES:
         if Path(candidate).exists():
             return candidate
@@ -106,6 +124,15 @@ def ark_api_key() -> str:
     if not key:
         raise RuntimeError("请先在设置里填写火山方舟 API Key。")
     return key
+
+
+def ark_ssl_context() -> ssl.SSLContext:
+    if certifi is not None:
+        try:
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    return ssl.create_default_context()
 
 
 def is_macos() -> bool:
@@ -680,7 +707,7 @@ def call_ark_chat(content: list[dict], task_id: str | None = None) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=600) as resp:
+        with urllib.request.urlopen(request, timeout=600, context=ark_ssl_context()) as resp:
             ensure_not_cancelled(task_id)
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:

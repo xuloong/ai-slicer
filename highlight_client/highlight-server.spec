@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_dynamic_libs
+
+datas = [('static', 'static')]
+binaries = []
+datas += collect_data_files('certifi')
+binaries += collect_dynamic_libs('imageio_ffmpeg')
 
 
 a = Analysis(
     ['server.py'],
     pathex=[],
-    binaries=[],
-    datas=[('static', 'static')],
+    binaries=binaries,
+    datas=datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

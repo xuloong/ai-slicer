@@ -57,6 +57,10 @@ def main() -> None:
         "highlight-server",
         "--add-data",
         add_data,
+        "--collect-data",
+        "certifi",
+        "--collect-binaries",
+        "imageio_ffmpeg",
         "server.py",
     ])
 
