@@ -15,15 +15,16 @@
       </div>
       <label class="field">
         <span>视频路径</span>
-        <span class="pathPicker">
+        <span class="pathPicker videoPicker">
           <input id="videoPath" placeholder="请选择视频文件">
           <button id="pickVideoBtn" type="button">选择视频</button>
+          <button id="quickStoryboardBtn" type="button">分镜</button>
+          <button id="quickThumbBtn" type="button">缩略图</button>
+          <button id="quickHighlightBtn" type="button">高光</button>
+          <button id="quickPackageBtn" type="button">成片</button>
         </span>
       </label>
       <div class="actions">
-        <button id="thumbBtn">生成缩略图</button>
-        <button id="autoBtn">识别高光</button>
-        <button id="aiAutoBtn">AI识别高光</button>
         <button id="settingsBtn" class="iconBtn" type="button" title="设置" aria-label="设置">⚙</button>
       </div>
       <div id="taskProgress" class="progressWrap" hidden>
@@ -40,46 +41,135 @@
     </section>
 
     <section class="workspace">
-      <aside class="panel timeline">
-        <div class="sectionHead">
-          <h2>片段列表</h2>
-          <button id="addClipBtn" title="添加片段">+</button>
+      <aside class="panel historyPanel">
+        <div class="sectionHead historyHead">
+          <h2>历史任务</h2>
+          <button id="refreshHistoryBtn" type="button">刷新</button>
         </div>
-        <label class="target">
-          <span>目标时长</span>
-          <input id="targetSeconds" type="number" min="30" max="600" value="180">
-          <span>秒</span>
-        </label>
-        <div id="autoSummary" class="note"></div>
-        <div id="clips"></div>
-        <div class="summary">
-          <span>总时长</span>
-          <strong id="totalDuration">00:00</strong>
-        </div>
-        <label class="field exportDir">
-          <span>导出目录</span>
-          <span class="pathPicker">
-            <input id="outputDir" placeholder="默认保存到工具 exports 目录">
-            <button id="pickDirBtn" type="button">选择目录</button>
-          </span>
-        </label>
-        <div class="exportActions">
-          <button id="exportSegmentsBtn" type="button">导出片段</button>
-          <button id="exportBtn" class="primary">导出成片</button>
-        </div>
-        <div id="exportResult"></div>
+        <div id="historyList" class="historyList empty">暂无历史记录。</div>
       </aside>
 
-      <section class="panel thumbs">
-        <div class="sectionHead">
-          <h2>缩略图总览</h2>
-          <label class="inline">
-            <span>间隔</span>
-            <input id="interval" type="number" min="3" max="30" value="10">
-            <span>秒</span>
-          </label>
+      <section class="panel workbench">
+        <div class="contentTabs" role="tablist" aria-label="内容结果">
+          <button id="storyboardTabBtn" class="active" type="button" role="tab" aria-selected="true">分镜脚本</button>
+          <button id="thumbTabBtn" type="button" role="tab" aria-selected="false">缩略图总览</button>
+          <button id="highlightTabBtn" type="button" role="tab" aria-selected="false">识别高光</button>
+          <button id="packageTabBtn" type="button" role="tab" aria-selected="false">一键成片</button>
         </div>
-        <div id="thumbGrid" class="grid empty">点击“生成缩略图”后在这里选点。</div>
+        <section id="storyboardPanel" class="tabPanel" role="tabpanel">
+          <div class="sectionHead storyboardHead">
+            <h2>分镜脚本</h2>
+            <div class="sectionActions">
+              <button id="storyboardBtn" type="button">生成分镜脚本</button>
+              <button id="exportStoryboardBtn" type="button">导出分镜</button>
+            </div>
+          </div>
+          <div id="storySummary" class="note"></div>
+          <div id="storyboardList" class="storyboardList empty">生成后会在这里展示镜号、时间、画面、景别、运镜、字幕和剪辑建议。</div>
+        </section>
+        <section id="thumbPanel" class="tabPanel" role="tabpanel" hidden>
+          <div class="sectionHead thumbHead">
+            <h2>缩略图总览</h2>
+            <div class="sectionActions">
+              <label class="inline thumbInterval">
+                <span>间隔</span>
+                <input id="interval" type="number" min="3" max="30" value="10">
+                <span>秒</span>
+              </label>
+              <button id="thumbBtn" type="button">生成缩略图</button>
+            </div>
+          </div>
+          <div id="thumbGrid" class="grid empty">点击“生成缩略图”后在这里选点。</div>
+        </section>
+        <section id="highlightPanel" class="tabPanel" role="tabpanel" hidden>
+          <div class="sectionHead">
+            <h2>识别高光</h2>
+            <div class="sectionActions highlightActions">
+              <label class="target">
+                <span>目标时长</span>
+                <input id="targetSeconds" type="number" min="30" max="600" value="180">
+                <span>秒</span>
+              </label>
+              <button id="autoBtn" type="button">识别高光</button>
+              <button id="aiAutoBtn" type="button">AI识别高光</button>
+              <button id="addClipBtn" title="添加片段">+</button>
+            </div>
+          </div>
+          <label class="field aiRequirement">
+            <span>AI剪辑要求</span>
+            <textarea id="aiRequirement" rows="3" placeholder="例如：更偏剧情反转，少选铺垫，结尾停在冲突点"></textarea>
+          </label>
+          <div id="autoSummary" class="note"></div>
+          <div id="clipInsights" class="insights empty">识别后会在这里展示片段依据。</div>
+          <div id="clips"></div>
+          <div id="previewPane" class="previewPane" hidden>
+            <video id="clipPreview" controls></video>
+            <div id="previewState"></div>
+          </div>
+          <div class="summary">
+            <span>总时长</span>
+            <strong id="totalDuration">00:00</strong>
+          </div>
+          <div class="exportBlock">
+            <label class="field exportDir">
+              <span>导出目录</span>
+              <span class="pathPicker">
+                <input id="outputDir" placeholder="默认保存到工具 exports 目录">
+                <button id="pickDirBtn" type="button">选择目录</button>
+              </span>
+            </label>
+            <div class="inlineActions exportButtons">
+              <button id="exportSegmentsBtn" type="button">导出片段</button>
+              <button id="exportBtn" class="primary">导出成片</button>
+            </div>
+          </div>
+        </section>
+        <section id="packagePanel" class="tabPanel" role="tabpanel" hidden>
+          <div class="sectionHead">
+            <h2>一键成片</h2>
+          </div>
+          <div class="packageForm">
+            <div class="packageTopRow">
+              <label class="field">
+                <span>模板</span>
+                <select id="packageTemplate"></select>
+              </label>
+              <label class="inline packageToggle">
+                <input id="packageBgm" type="checkbox" checked>
+                <span>未上传 BGM 时使用模板默认 BGM</span>
+              </label>
+            </div>
+            <div class="assetGroup">
+              <div class="sectionHead compactHead">
+                <h2>AI识别重点</h2>
+                <button id="aiFocusBtn" type="button">AI识别重点</button>
+              </div>
+              <label class="field">
+                <span>识别要求</span>
+                <input id="focusRequirement" placeholder="例如：重点识别价格、优惠、商品卖点；留空则由 AI 自行判断">
+              </label>
+              <div id="focusList" class="assetList empty">暂无重点标记。</div>
+            </div>
+            <div class="assetGroup">
+              <div class="sectionHead compactHead">
+                <h2>贴图素材</h2>
+                <button id="addStickerBtn" type="button">添加贴图</button>
+              </div>
+              <div id="stickersList" class="assetList empty">暂无贴图素材。</div>
+            </div>
+            <div class="assetGroup">
+              <div class="sectionHead compactHead">
+                <h2>BGM 素材</h2>
+                <button id="addBgmBtn" type="button">添加 BGM</button>
+              </div>
+              <div id="bgmList" class="assetList empty">暂无 BGM 素材。</div>
+            </div>
+            <div class="packageActions">
+              <button id="oneClickBtn" class="primary" type="button">一键成片</button>
+            </div>
+          </div>
+        </section>
+        <div id="exportResult"></div>
       </section>
     </section>
   </main>
@@ -103,6 +193,44 @@
             <button id="pickFfmpegBtn" type="button">选择</button>
           </span>
         </label>
+        <label class="field settingsWide">
+          <span>使用日志 Webhook</span>
+          <input id="wecomWebhookUrl" placeholder="用于功能使用通知，仅保存在本机">
+        </label>
+        <label class="field">
+          <span>姓名</span>
+          <input id="usageLogName" placeholder="例如：张三">
+        </label>
+        <label class="field">
+          <span>部门</span>
+          <input id="usageLogDept" placeholder="例如：内容团队">
+        </label>
+        <div class="settingsDivider settingsWide">模板配置</div>
+        <label class="field">
+          <span>选择模板</span>
+          <select id="templateEditorSelect"></select>
+        </label>
+        <label class="field">
+          <span>模板名称</span>
+          <input id="templateName" placeholder="例如：直播强转化">
+        </label>
+        <label class="field">
+          <span>视觉风格</span>
+          <select id="templateStyle">
+            <option value="drama">短剧增强</option>
+            <option value="ad">广告增强</option>
+            <option value="clean">干净原片</option>
+          </select>
+        </label>
+        <label class="inline packageToggle settingsWide">
+          <input id="templateDefaultBgm" type="checkbox" checked>
+          <span>默认启用 BGM</span>
+        </label>
+        <div class="templateActions settingsWide">
+          <button id="addTemplateBtn" type="button">新增模板</button>
+          <button id="updateTemplateBtn" type="button">保存模板</button>
+          <button id="deleteTemplateBtn" type="button">删除模板</button>
+        </div>
       </div>
       <div class="settingsActions">
         <button id="saveConfigBtn" type="button">保存设置</button>
