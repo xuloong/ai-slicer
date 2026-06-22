@@ -62,7 +62,7 @@ scripts\build_app_windows.bat
 临时内测时，如果用户确认来源可信但系统提示无法打开，可在用户本机执行：
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/AI切片神器.app"
+xattr -dr com.apple.quarantine "/Applications/AI短视频创作工具.app"
 ```
 
 这只是内测绕过方式，不建议作为正式交付方案。

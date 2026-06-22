@@ -3,27 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI切片神器</title>
+  <title>AI短视频创作工具</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <main class="app">
     <section class="panel setup">
       <div>
-        <h1>AI切片神器</h1>
-        <p>自动识别高光片段，生成短视频。</p>
+        <h1>AI短视频创作工具</h1>
+        <p>从视频素材到分镜、生成与成片，一站式完成短视频创作。</p>
       </div>
-      <label class="field">
-        <span>视频路径</span>
-        <span class="pathPicker videoPicker">
-          <input id="videoPath" placeholder="请选择视频文件">
-          <button id="pickVideoBtn" type="button">选择视频</button>
-          <button id="quickStoryboardBtn" type="button">分镜</button>
-          <button id="quickThumbBtn" type="button">缩略图</button>
-          <button id="quickHighlightBtn" type="button">高光</button>
-          <button id="quickPackageBtn" type="button">成片</button>
-        </span>
-      </label>
+      <div class="sourceGrid">
+        <label class="field shareField">
+          <span>抖音/小红书视频分享链接</span>
+          <span class="pathPicker sharePicker">
+            <input id="shareUrl" placeholder="点击自动读取剪贴板，也可手动粘贴">
+            <button id="downloadShareBtn" type="button">下载视频</button>
+          </span>
+        </label>
+        <label class="field">
+          <span>视频路径</span>
+          <span class="pathPicker videoPicker">
+            <input id="videoPath" placeholder="请选择视频文件">
+            <button id="pickVideoBtn" type="button">选择视频</button>
+            <button id="quickStoryboardBtn" type="button">分镜</button>
+            <button id="quickThumbBtn" type="button">缩略图</button>
+            <button id="quickHighlightBtn" type="button">高光</button>
+            <button id="quickPackageBtn" type="button">成片</button>
+          </span>
+        </label>
+      </div>
       <div class="actions">
         <button id="settingsBtn" class="iconBtn" type="button" title="设置" aria-label="设置">⚙</button>
       </div>
@@ -61,10 +70,26 @@
             <h2>分镜脚本</h2>
             <div class="sectionActions">
               <button id="storyboardBtn" type="button">生成分镜脚本</button>
+              <button id="storyboardImagesBtn" type="button">生成分镜图</button>
+              <button id="storyboardVideosBtn" type="button">生成视频片段</button>
               <button id="exportStoryboardBtn" type="button">导出分镜</button>
             </div>
           </div>
           <div id="storySummary" class="note"></div>
+          <div class="referencePanel">
+            <div class="referenceHead">
+              <strong>分镜图参考图 <span id="storyboardRefCount">0/16</span></strong>
+              <div class="referenceActions">
+                <button id="addStoryboardRefBtn" type="button">上传图片</button>
+                <button id="clearStoryboardRefsBtn" type="button">清空</button>
+              </div>
+            </div>
+            <div id="storyboardRefsList" class="referenceList empty">可上传人物、场景、商品或风格参考图，最多 16 张。</div>
+            <label class="field referenceDescription">
+              <span>参考图说明</span>
+              <textarea id="storyboardRefDescription" rows="3" placeholder="例如：第1张是女主形象，第2张是男主形象，第3张是客厅场景，第4张是产品外观。生成时保持人物、场景和风格一致。"></textarea>
+            </label>
+          </div>
           <div id="storyboardList" class="storyboardList empty">生成后会在这里展示镜号、时间、画面、景别、运镜、字幕和剪辑建议。</div>
         </section>
         <section id="thumbPanel" class="tabPanel" role="tabpanel" hidden>
@@ -197,6 +222,42 @@
           <span>使用日志 Webhook</span>
           <input id="wecomWebhookUrl" placeholder="用于功能使用通知，仅保存在本机">
         </label>
+        <div class="settingsDivider settingsWide">AI 生成配置</div>
+        <label class="field settingsWide">
+          <span>APIMart API Key（GPT-Image-2 / Seedance2.0）</span>
+          <input id="apimartApiKey" type="password" placeholder="仅保存在本机配置文件中">
+        </label>
+        <label class="field">
+          <span>分镜图比例</span>
+          <select id="apimartImageSize">
+            <option value="9:16">9:16 竖屏</option>
+            <option value="16:9">16:9 横屏</option>
+            <option value="1:1">1:1 方形</option>
+            <option value="3:4">3:4 竖版</option>
+            <option value="4:3">4:3 横版</option>
+            <option value="auto">自动</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>分镜图清晰度</span>
+          <select id="apimartImageResolution">
+            <option value="1k">1K</option>
+            <option value="2k">2K</option>
+            <option value="4k">4K</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>视频片段时长</span>
+          <input id="seedanceDuration" type="number" min="4" max="15" value="5">
+        </label>
+        <label class="field">
+          <span>视频片段清晰度</span>
+          <select id="seedanceResolution">
+            <option value="480p">480p</option>
+            <option value="720p">720p</option>
+            <option value="1080p">1080p</option>
+          </select>
+        </label>
         <label class="field">
           <span>姓名</span>
           <input id="usageLogName" placeholder="例如：张三">
@@ -205,6 +266,13 @@
           <span>部门</span>
           <input id="usageLogDept" placeholder="例如：内容团队">
         </label>
+        <label class="field">
+          <span>下载视频保留天数</span>
+          <input id="downloadRetentionDays" type="number" min="0" max="365" value="30">
+        </label>
+        <div class="settingsInlineAction">
+          <button id="openDownloadsBtn" type="button">查看下载目录</button>
+        </div>
         <div class="settingsDivider settingsWide">模板配置</div>
         <label class="field">
           <span>选择模板</span>

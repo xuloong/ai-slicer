@@ -52,10 +52,16 @@ DATA_DIR = app_data_dir()
 WORK = DATA_DIR / "work"
 EXPORTS = DATA_DIR / "exports"
 PREVIEWS = DATA_DIR / "previews"
+DOWNLOADS = DATA_DIR / "downloads"
+GENERATIONS = DATA_DIR / "generations"
 CONFIG_FILE = DATA_DIR / "user_config.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 ARK_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 ARK_MODEL = "doubao-seed-2-0-pro-260215"
+APIMART_IMAGE_URL = "https://api.apimart.ai/v1/images/generations"
+APIMART_VIDEO_URL = "https://api.apimart.ai/v1/videos/generations"
+APIMART_TASK_URL = "https://api.apimart.ai/v1/tasks"
+APIMART_UPLOAD_IMAGE_URL = "https://api.apimart.ai/v1/uploads/images"
 FFMPEG_CANDIDATES = [
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
@@ -67,6 +73,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 WORK.mkdir(parents=True, exist_ok=True)
 EXPORTS.mkdir(parents=True, exist_ok=True)
 PREVIEWS.mkdir(parents=True, exist_ok=True)
+DOWNLOADS.mkdir(parents=True, exist_ok=True)
+GENERATIONS.mkdir(parents=True, exist_ok=True)
 TASKS: dict[str, dict] = {}
 TASK_LOCK = threading.Lock()
 
@@ -181,14 +189,22 @@ def append_history(action: str, video: Path | None = None, **extra: object) -> N
 def public_config() -> dict:
     config = load_config()
     api_key = os.environ.get("ARK_API_KEY") or config.get("arkApiKey", "")
+    apimart_key = os.environ.get("APIMART_API_KEY") or config.get("apimartApiKey", "")
     return {
         "hasArkApiKey": bool(api_key),
         "arkApiKeyMasked": f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 16 else "",
+        "hasApimartApiKey": bool(apimart_key),
+        "apimartApiKeyMasked": f"{apimart_key[:8]}...{apimart_key[-4:]}" if len(apimart_key) > 16 else "",
+        "apimartImageSize": config.get("apimartImageSize", "9:16"),
+        "apimartImageResolution": config.get("apimartImageResolution", "1k"),
+        "seedanceDuration": config.get("seedanceDuration", 5),
+        "seedanceResolution": config.get("seedanceResolution", "720p"),
         "ffmpegPath": config.get("ffmpegPath", ""),
         "detectedFfmpegPath": detect_ffmpeg_path() or "",
         "wecomWebhookUrl": config.get("wecomWebhookUrl", ""),
         "usageLogName": config.get("usageLogName", ""),
         "usageLogDept": config.get("usageLogDept", ""),
+        "downloadRetentionDays": download_retention_days(),
         "packageTemplate": config.get("packageTemplate", "none"),
         "packageTemplates": configured_package_templates(),
     }
@@ -240,7 +256,7 @@ def notify_wecom(content: str) -> None:
 def notify_feature_used(feature: str, details: str = "") -> None:
     user, dept = usage_identity()
     lines = [
-        "AI切片神器功能使用通知",
+        "AI短视频创作工具功能使用通知",
         f"> 姓名：{user}",
         f"> 部门：{dept}",
         f"> 功能：{feature}",
@@ -351,10 +367,142 @@ def video_display_size(video: Path, fallback: tuple[int, int] | None = None) -> 
     return max(1, width), max(1, height)
 
 
+def extract_share_url(value: str) -> str:
+    match = re.search(r"https?://[^\s<>'\"，。；、]+", value or "")
+    if not match:
+        raise RuntimeError("没有识别到有效链接，请粘贴抖音或小红书分享链接。")
+    return match.group(0).rstrip(").,，。")
+
+
+def download_retention_days() -> int:
+    try:
+        return max(0, int(load_config().get("downloadRetentionDays", 30)))
+    except (TypeError, ValueError):
+        return 30
+
+
+def cleanup_old_downloads() -> int:
+    days = download_retention_days()
+    if days <= 0:
+        return 0
+    cutoff = datetime.now().timestamp() - days * 86400
+    removed = 0
+    for item in DOWNLOADS.iterdir():
+        try:
+            if item.stat().st_mtime >= cutoff:
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
+def download_video_from_url(share_text: str, task_id: str | None = None) -> dict:
+    cleanup_old_downloads()
+    url = extract_share_url(share_text)
+    job = uuid.uuid4().hex[:10]
+    out_dir = DOWNLOADS / job
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if task_id:
+        task_update(task_id, 8, "正在解析分享链接")
+
+    try:
+        import yt_dlp
+    except Exception:
+        yt_dlp = None
+
+    if yt_dlp is not None:
+        downloaded: list[str] = []
+
+        def hook(info: dict) -> None:
+            ensure_not_cancelled(task_id)
+            status = info.get("status")
+            if status == "downloading":
+                total = info.get("total_bytes") or info.get("total_bytes_estimate") or 0
+                done = info.get("downloaded_bytes") or 0
+                percent = 20 + int(min(1.0, done / max(1, total)) * 65) if total else 30
+                if task_id:
+                    task_update(task_id, percent, "正在下载视频")
+            elif status == "finished":
+                filename = info.get("filename")
+                if filename:
+                    downloaded.append(filename)
+                if task_id:
+                    task_update(task_id, 88, "正在整理视频文件")
+
+        options = {
+            "outtmpl": str(out_dir / "%(title).80s_%(id)s.%(ext)s"),
+            "format": "bv*+ba/best",
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [hook],
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+            },
+        }
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=True)
+                ensure_not_cancelled(task_id)
+                filename = ydl.prepare_filename(info)
+                if options.get("merge_output_format") and Path(filename).suffix.lower() != ".mp4":
+                    filename = str(Path(filename).with_suffix(".mp4"))
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"下载失败：{exc}")
+        candidates = [Path(item) for item in downloaded]
+        candidates.append(Path(filename))
+        candidates.extend(sorted(out_dir.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True))
+        video = next((item for item in candidates if item.exists() and item.is_file() and item.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}), None)
+        if not video:
+            raise RuntimeError("下载完成但没有找到视频文件。")
+        if task_id:
+            task_update(task_id, 96, "正在读取下载视频信息")
+        duration = media_duration_seconds(video)
+        return {
+            "path": str(video),
+            "url": url,
+            "title": str(info.get("title") or video.stem),
+            "duration": seconds_to_clock(duration) if duration > 0 else "未知",
+        }
+
+    binary = shutil.which("yt-dlp")
+    if not binary:
+        raise RuntimeError("当前环境缺少 yt-dlp，无法下载抖音/小红书视频。请重新打包新版客户端，或安装 yt-dlp。")
+    if task_id:
+        task_update(task_id, 20, "正在下载视频")
+    output = out_dir / "%(title).80s_%(id)s.%(ext)s"
+    result = run([
+        binary, "--no-playlist", "-f", "bv*+ba/best",
+        "--merge-output-format", "mp4", "-o", str(output), url,
+    ], timeout=None, task_id=task_id)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout)[-1200:])
+    video = next((item for item in sorted(out_dir.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True) if item.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}), None)
+    if not video:
+        raise RuntimeError("下载完成但没有找到视频文件。")
+    duration = media_duration_seconds(video)
+    return {"path": str(video), "url": url, "title": video.stem, "duration": seconds_to_clock(duration) if duration > 0 else "未知"}
+
+
 def ark_api_key() -> str:
     key = os.environ.get("ARK_API_KEY") or load_config().get("arkApiKey", "")
     if not key:
         raise RuntimeError("请先在设置里填写火山方舟 API Key。")
+    return key
+
+
+def apimart_api_key() -> str:
+    key = os.environ.get("APIMART_API_KEY") or load_config().get("apimartApiKey", "")
+    if not key:
+        raise RuntimeError("请先在设置里填写 APIMart API Key。")
     return key
 
 
@@ -365,6 +513,142 @@ def ark_ssl_context() -> ssl.SSLContext:
         except Exception:
             pass
     return ssl.create_default_context()
+
+
+def json_request(method: str, url: str, payload: dict | None = None, token: str | None = None, timeout: int = 120) -> dict:
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"content-type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=ark_ssl_context()) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"APIMart 接口请求失败：HTTP {exc.code} {body[:800]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"无法连接 APIMart 接口：{exc}") from exc
+
+
+def image_mime_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    if suffix == ".gif":
+        return "image/gif"
+    return "image/png"
+
+
+def apimart_upload_image(path: Path, task_id: str | None = None) -> str:
+    ensure_not_cancelled(task_id)
+    if not path.exists() or not path.is_file():
+        raise RuntimeError(f"参考图不存在：{path}")
+    if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        raise RuntimeError(f"参考图格式不支持：{path.name}")
+    if path.stat().st_size > 20 * 1024 * 1024:
+        raise RuntimeError(f"参考图超过 20MB：{path.name}")
+    boundary = f"----apimart-{uuid.uuid4().hex}"
+    header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
+        f"Content-Type: {image_mime_type(path)}\r\n\r\n"
+    ).encode("utf-8")
+    body = header + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    request = urllib.request.Request(
+        APIMART_UPLOAD_IMAGE_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {apimart_api_key()}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180, context=ark_ssl_context()) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"APIMart 参考图上传失败：HTTP {exc.code} {body_text[:800]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"无法上传参考图到 APIMart：{exc}") from exc
+    url = result.get("url") if isinstance(result, dict) else ""
+    if not url:
+        raise RuntimeError(f"APIMart 上传参考图未返回 URL：{json.dumps(result, ensure_ascii=False)[:800]}")
+    return str(url)
+
+
+def apimart_submit(url: str, payload: dict, task_id: str | None = None) -> str:
+    ensure_not_cancelled(task_id)
+    result = json_request("POST", url, payload, token=apimart_api_key(), timeout=120)
+    if int(result.get("code", 0)) != 200:
+        raise RuntimeError(f"APIMart 提交失败：{json.dumps(result, ensure_ascii=False)[:800]}")
+    data = result.get("data")
+    first = data[0] if isinstance(data, list) and data else {}
+    remote_task_id = first.get("task_id") or first.get("id")
+    if not remote_task_id:
+        raise RuntimeError(f"APIMart 未返回任务 ID：{json.dumps(result, ensure_ascii=False)[:800]}")
+    return str(remote_task_id)
+
+
+def apimart_poll(remote_task_id: str, task_id: str | None = None, base_progress: int = 10, span: int = 70, timeout_seconds: int = 1800) -> dict:
+    started = datetime.now().timestamp()
+    while True:
+        ensure_not_cancelled(task_id)
+        elapsed = datetime.now().timestamp() - started
+        if elapsed > timeout_seconds:
+            raise RuntimeError("APIMart 任务等待超时，请稍后在平台任务记录中查看，或降低清晰度后重试。")
+        result = json_request("GET", f"{APIMART_TASK_URL}/{remote_task_id}?language=zh", token=apimart_api_key(), timeout=60)
+        if int(result.get("code", 0)) != 200:
+            raise RuntimeError(f"APIMart 查询失败：{json.dumps(result, ensure_ascii=False)[:800]}")
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        status = str(data.get("status") or "").lower()
+        try:
+            remote_progress = max(0, min(100, int(float(data.get("progress")))))
+        except (TypeError, ValueError):
+            remote_progress = min(95, int(elapsed / max(1, timeout_seconds) * 100))
+        if task_id:
+            task_update(task_id, base_progress + int(remote_progress / 100 * span), f"APIMart 生成中：{status or 'processing'} {remote_progress}%")
+        if status == "completed":
+            return data
+        if status in {"failed", "cancelled", "canceled"}:
+            message = data.get("error") or data.get("message") or data.get("fail_reason") or status
+            raise RuntimeError(f"APIMart 任务失败：{message}")
+        threading.Event().wait(3)
+
+
+def result_urls(task_data: dict, kind: str) -> list[str]:
+    result = task_data.get("result") if isinstance(task_data.get("result"), dict) else {}
+    items = result.get(kind)
+    urls: list[str] = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, str):
+                urls.append(item)
+            elif isinstance(item, dict):
+                value = item.get("url") or item.get("urls") or item.get("video_url") or item.get("image_url")
+                if isinstance(value, list):
+                    urls.extend(str(url) for url in value if url)
+                elif value:
+                    urls.append(str(value))
+    elif isinstance(items, str):
+        urls.append(items)
+    return urls
+
+
+def download_result_url(url: str, output: Path, task_id: str | None = None) -> Path:
+    ensure_not_cancelled(task_id)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(url, headers={"user-agent": "AI-Slicer/1.0"})
+    with urllib.request.urlopen(request, timeout=240, context=ark_ssl_context()) as resp:
+        output.write_bytes(resp.read())
+    return output
+
+
+def generation_public_path(path: Path) -> str:
+    return f"/generations/{path.relative_to(GENERATIONS).as_posix()}"
 
 
 def is_macos() -> bool:
@@ -506,25 +790,38 @@ def start_task(name: str, worker) -> str:
     return task_id
 
 
-def parse_duration(stderr: str) -> str:
-    for line in stderr.splitlines():
+def safe_text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def command_tail(result: subprocess.CompletedProcess[str], limit: int = 1200) -> str:
+    text = safe_text(getattr(result, "stderr", "")) or safe_text(getattr(result, "stdout", ""))
+    return text[-limit:] or "命令执行失败，但没有返回错误详情。"
+
+
+def parse_duration(stderr: object) -> str:
+    for line in safe_text(stderr).splitlines():
         line = line.strip()
         if line.startswith("Duration:"):
             return line.split("Duration:", 1)[1].split(",", 1)[0].strip()
     return "未知"
 
 
-def parse_duration_seconds(stderr: str) -> float:
+def parse_duration_seconds(stderr: object) -> float:
     duration = parse_duration(stderr)
     if duration == "未知":
         return 0.0
-    hours, minutes, seconds = duration.split(":")
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    try:
+        hours, minutes, seconds = duration.split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except (TypeError, ValueError):
+        return 0.0
 
 
-def parse_media_info(stderr: str) -> dict:
+def parse_media_info(stderr: object) -> dict:
+    stderr_text = safe_text(stderr)
     info = {
-        "duration": parse_duration(stderr),
+        "duration": parse_duration(stderr_text),
         "video": "未检测到",
         "audio": "未检测到",
         "resolution": "未知",
@@ -532,7 +829,7 @@ def parse_media_info(stderr: str) -> dict:
         "fps": "未知",
         "bitrate": "未知",
     }
-    for line in stderr.splitlines():
+    for line in stderr_text.splitlines():
         text = line.strip()
         if "Duration:" in text and "bitrate:" in text:
             info["bitrate"] = text.split("bitrate:", 1)[1].strip()
@@ -637,10 +934,10 @@ def extract_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> 
     env = os.environ.copy()
     env["CLANG_MODULE_CACHE_PATH"] = str(WORK / ".clang-cache")
     result = run(["swift", str(script)], env=env, timeout=None, task_id=task_id)
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0 or not safe_text(result.stdout).strip():
         return []
     try:
-        rows = json.loads(result.stdout)
+        rows = json.loads(safe_text(result.stdout))
     except json.JSONDecodeError:
         return []
 
@@ -722,7 +1019,7 @@ def build_highlight_analysis(video: Path, task_id: str | None = None) -> dict:
     probe = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=120, task_id=task_id)
     duration = parse_duration_seconds(probe.stderr)
     if duration <= 0:
-        raise RuntimeError("无法读取视频时长。")
+        raise RuntimeError(f"无法读取视频时长，请确认 ffmpeg 可用且视频文件能正常打开。{command_tail(probe, 500)}")
 
     fps = 2
     pattern = out_dir / "frame_%06d.jpg"
@@ -733,7 +1030,7 @@ def build_highlight_analysis(video: Path, task_id: str | None = None) -> dict:
         "-vf", f"fps={fps},scale=96:-1", str(pattern)
     ], timeout=None, task_id=task_id)
     if extract.returncode != 0:
-        raise RuntimeError(extract.stderr[-1200:])
+        raise RuntimeError(command_tail(extract, 1200))
 
     files = sorted(out_dir.glob("frame_*.jpg"))
     if len(files) < 4:
@@ -949,12 +1246,21 @@ def call_ark_chat(content: list[dict], task_id: str | None = None) -> str:
         raise RuntimeError(f"火山方舟接口请求失败：HTTP {exc.code} {detail[-800:]}")
     except urllib.error.URLError as exc:
         raise RuntimeError(f"无法连接火山方舟接口：{exc}")
-    return data["choices"][0]["message"]["content"]
+    try:
+        content_text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"火山方舟接口返回结构异常：{json.dumps(data, ensure_ascii=False)[:800]}") from exc
+    if not safe_text(content_text).strip():
+        raise RuntimeError("火山方舟接口返回了空内容，请稍后重试或检查 API Key / 模型权限。")
+    return safe_text(content_text)
 
 
-def parse_ai_json(text: str) -> dict:
+def parse_ai_json(text: object) -> dict:
     decoder = json.JSONDecoder()
+    text = safe_text(text)
     cleaned = text.strip()
+    if not cleaned:
+        raise RuntimeError("AI 返回内容为空，无法生成结果。")
     try:
         value, _ = decoder.raw_decode(cleaned)
     except json.JSONDecodeError:
@@ -1293,6 +1599,212 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
     }
 
 
+def storyboard_image_prompt(shot: dict, index: int, reference_notes: str = "") -> str:
+    parts = [
+        "请生成一张适合短视频广告分镜的高清画面，真实商业摄影质感，主体清晰，构图干净，可直接作为视频首帧。",
+        "如果提供了参考图，请优先保持参考图中的人物脸型、发型、服装、商品外观、场景空间和整体风格一致；不要随意更换核心人物或场景设定。",
+        f"镜头{shot.get('shot') or index}",
+        f"画面：{shot.get('scene') or ''}",
+        f"景别：{shot.get('shotType') or ''}",
+        f"运镜参考：{shot.get('camera') or ''}",
+        f"动作/卖点：{shot.get('action') or ''}",
+    ]
+    if reference_notes:
+        parts.append(f"参考图说明：{reference_notes}")
+    if shot.get("caption"):
+        parts.append(f"可视化重点：{shot.get('caption')}")
+    return "\n".join(str(part).strip() for part in parts if str(part).strip())[:2400]
+
+
+def storyboard_video_prompt(shot: dict, index: int) -> str:
+    parts = [
+        "根据分镜生成自然流畅的短视频片段，真实广告片质感，动作连贯，镜头稳定，不要出现变形文字和错误字幕。",
+        f"镜头{shot.get('shot') or index}",
+        f"画面：{shot.get('scene') or ''}",
+        f"动作：{shot.get('action') or ''}",
+        f"运镜：{shot.get('camera') or '轻微推进'}",
+        f"剪辑节奏：{shot.get('edit') or '自然衔接'}",
+    ]
+    if shot.get("dialogue"):
+        parts.append(f"剧情/台词参考：{shot.get('dialogue')}")
+    if shot.get("caption"):
+        parts.append(f"重点信息参考：{shot.get('caption')}")
+    return "\n".join(str(part).strip() for part in parts if str(part).strip())[:1800]
+
+
+def normalize_generation_shots(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    shots = []
+    for index, item in enumerate(raw[:24], start=1):
+        if isinstance(item, dict):
+            shot = dict(item)
+            shot.setdefault("shot", str(index))
+            shots.append(shot)
+    return shots
+
+
+def normalize_reference_images(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    refs = []
+    for item in raw[:16]:
+        if isinstance(item, str):
+            path = item.strip()
+        elif isinstance(item, dict):
+            path = str(item.get("path") or "").strip()
+        else:
+            path = ""
+        if not path:
+            continue
+        refs.append({
+            "path": path,
+        })
+    return refs
+
+
+def reference_notes_text(refs: list[dict], description: str = "") -> str:
+    parts = []
+    if description:
+        parts.append(f"用户说明：{description.strip()[:1000]}")
+    for index, ref in enumerate(refs, start=1):
+        note = Path(str(ref.get("path") or "")).stem
+        parts.append(f"第{index}张参考图：{note}")
+    return "；".join(parts)[:1200]
+
+
+def upload_reference_images(refs: list[dict], task_id: str | None = None) -> list[str]:
+    urls = []
+    for index, ref in enumerate(refs, start=1):
+        ensure_not_cancelled(task_id)
+        if task_id:
+            task_update(task_id, 3 + int(index / max(1, len(refs)) * 14), f"正在上传参考图 {index}/{len(refs)}")
+        url = apimart_upload_image(Path(str(ref.get("path", ""))).expanduser(), task_id=task_id)
+        ref["url"] = url
+        urls.append(url)
+    return urls
+
+
+def batch_storyboard_image_prompt(batch: list[tuple[int, dict]], reference_notes: str = "") -> str:
+    lines = [
+        f"请一次生成 {len(batch)} 张短视频分镜图，按下面镜头顺序一一对应输出。每张图都是独立分镜，但人物、商品、场景和整体视觉风格必须保持一致。",
+        "真实商业摄影质感，主体清晰，构图干净，可直接作为视频首帧。不要在画面里生成难以阅读的文字。",
+    ]
+    if reference_notes:
+        lines.append(f"参考图说明：{reference_notes}")
+    for index, shot in batch:
+        lines.extend([
+            f"图{index} / 镜头{shot.get('shot') or index}",
+            f"画面：{shot.get('scene') or ''}",
+            f"景别：{shot.get('shotType') or ''}",
+            f"运镜参考：{shot.get('camera') or ''}",
+            f"动作/卖点：{shot.get('action') or ''}",
+        ])
+        if shot.get("caption"):
+            lines.append(f"可视化重点：{shot.get('caption')}")
+    return "\n".join(str(line).strip() for line in lines if str(line).strip())[:4000]
+
+
+def generate_storyboard_images(shots_raw: object, size: str = "9:16", resolution: str = "1k", references_raw: object = None, reference_description: str = "", task_id: str | None = None) -> dict:
+    shots = normalize_generation_shots(shots_raw)
+    if not shots:
+        raise RuntimeError("请先生成分镜脚本，再生成分镜图。")
+    size = size if size in {"auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "16:9", "9:16", "21:9"} or re.match(r"^\d+x\d+$", size or "") else "9:16"
+    resolution = resolution if resolution in {"1k", "2k", "4k"} else "1k"
+    references = normalize_reference_images(references_raw)
+    reference_urls = upload_reference_images(references, task_id=task_id) if references else []
+    reference_notes = reference_notes_text(references, reference_description)
+    job = uuid.uuid4().hex[:10]
+    out_dir = GENERATIONS / job / "images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    batches = [list(enumerate(shots[start:start + 4], start=start + 1)) for start in range(0, len(shots), 4)]
+    token_span = max(1, len(batches))
+    loop_start = 20 if references else 3
+    loop_span = 77 if references else 94
+    for batch_index, batch in enumerate(batches, start=1):
+        ensure_not_cancelled(task_id)
+        if task_id:
+            task_update(task_id, loop_start + int((batch_index - 1) / token_span * loop_span), f"正在提交分镜图批次 {batch_index}/{len(batches)}")
+        payload = {
+            "model": "gpt-image-2-official",
+            "prompt": batch_storyboard_image_prompt(batch, reference_notes=reference_notes),
+            "size": size,
+            "resolution": resolution,
+            "quality": "medium",
+            "n": len(batch),
+        }
+        if reference_urls:
+            payload["image_urls"] = reference_urls
+        remote_task_id = apimart_submit(APIMART_IMAGE_URL, payload, task_id=task_id)
+        task_data = apimart_poll(remote_task_id, task_id=task_id, base_progress=loop_start + int((batch_index - 1) / token_span * loop_span), span=max(3, int(60 / token_span)), timeout_seconds=900)
+        urls = result_urls(task_data, "images")
+        if len(urls) < len(batch):
+            raise RuntimeError(f"第 {batch_index} 批分镜图只返回了 {len(urls)} 张，少于请求的 {len(batch)} 张。")
+        for (index, shot), url in zip(batch, urls):
+            output = download_result_url(url, out_dir / f"shot_{index:02d}.png", task_id=task_id)
+            shot.update({
+                "imageUrl": url,
+                "imageTaskId": remote_task_id,
+                "imagePath": str(output),
+                "imageSrc": generation_public_path(output),
+            })
+    return {
+        "shots": shots,
+        "count": len(shots),
+        "outputDir": str(out_dir),
+        "references": references,
+        "summary": f"已生成 {len(shots)} 张分镜图。" + (f" 已使用 {len(references)} 张参考图保持一致性。" if references else ""),
+    }
+
+
+def generate_storyboard_videos(shots_raw: object, duration: int = 5, resolution: str = "720p", size: str = "adaptive", task_id: str | None = None) -> dict:
+    shots = normalize_generation_shots(shots_raw)
+    if not shots:
+        raise RuntimeError("请先生成分镜脚本，再生成视频片段。")
+    duration = max(4, min(15, int(duration or 5)))
+    resolution = resolution if resolution in {"480p", "720p", "1080p"} else "720p"
+    size = size if size in {"adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"} else "adaptive"
+    job = uuid.uuid4().hex[:10]
+    out_dir = GENERATIONS / job / "videos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    token_span = max(1, len(shots))
+    for index, shot in enumerate(shots, start=1):
+        ensure_not_cancelled(task_id)
+        if task_id:
+            task_update(task_id, 3 + int((index - 1) / token_span * 94), f"正在提交视频片段 {index}/{len(shots)}")
+        payload = {
+            "model": "doubao-seedance-2.0",
+            "prompt": storyboard_video_prompt(shot, index),
+            "resolution": resolution,
+            "duration": duration,
+            "generate_audio": False,
+        }
+        image_url = str(shot.get("imageUrl") or "").strip()
+        if image_url:
+            payload["image_urls"] = [image_url]
+            payload["size"] = "adaptive"
+        else:
+            payload["size"] = size if size != "adaptive" else "9:16"
+        remote_task_id = apimart_submit(APIMART_VIDEO_URL, payload, task_id=task_id)
+        task_data = apimart_poll(remote_task_id, task_id=task_id, base_progress=5 + int((index - 1) / token_span * 88), span=max(3, int(70 / token_span)), timeout_seconds=1800)
+        urls = result_urls(task_data, "videos")
+        if not urls:
+            raise RuntimeError(f"第 {index} 个视频片段没有返回视频 URL。")
+        output = download_result_url(urls[0], out_dir / f"shot_{index:02d}.mp4", task_id=task_id)
+        shot.update({
+            "videoUrl": urls[0],
+            "videoTaskId": remote_task_id,
+            "videoPath": str(output),
+            "videoSrc": generation_public_path(output),
+        })
+    return {
+        "shots": shots,
+        "count": len(shots),
+        "outputDir": str(out_dir),
+        "summary": f"已生成 {len(shots)} 个视频片段。",
+    }
+
+
 def generate_thumbnails(video: Path, interval: int, task_id: str | None = None) -> dict:
     ensure_not_cancelled(task_id)
     if task_id:
@@ -1303,7 +1815,7 @@ def generate_thumbnails(video: Path, interval: int, task_id: str | None = None) 
     probe = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=120, task_id=task_id)
     duration = parse_duration_seconds(probe.stderr)
     if duration <= 0:
-        raise RuntimeError("无法读取视频时长。")
+        raise RuntimeError(f"无法读取视频时长，请确认 ffmpeg 可用且视频文件能正常打开。{command_tail(probe, 500)}")
 
     times = [float(value) for value in range(0, max(1, int(duration)), interval)]
     if not times:
@@ -1324,7 +1836,7 @@ def generate_thumbnails(video: Path, interval: int, task_id: str | None = None) 
             "-frames:v", "1", "-q:v", "3", str(file)
         ], timeout=None, task_id=task_id)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr[-1200:])
+            raise RuntimeError(command_tail(result, 1200))
         if file.exists():
             files.append((file, time))
 
@@ -1360,8 +1872,8 @@ def choose_file() -> str:
         script = 'POSIX path of (choose file with prompt "选择要剪辑的视频")'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "已取消选择。")
-        return result.stdout.strip()
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
     return choose_with_tkinter(kind="file")
 
 
@@ -1370,8 +1882,8 @@ def choose_binary() -> str:
         script = 'POSIX path of (choose file with prompt "选择 ffmpeg 可执行文件")'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "已取消选择。")
-        return result.stdout.strip()
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
     return choose_with_tkinter(kind="binary")
 
 
@@ -1380,8 +1892,18 @@ def choose_logo() -> str:
         script = 'POSIX path of (choose file with prompt "选择贴图图片")'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "已取消选择。")
-        return result.stdout.strip()
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
+    return choose_with_tkinter(kind="logo")
+
+
+def choose_reference_image() -> str:
+    if is_macos():
+        script = 'POSIX path of (choose file with prompt "选择分镜参考图")'
+        result = run(["osascript", "-e", script], timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
     return choose_with_tkinter(kind="logo")
 
 
@@ -1390,8 +1912,8 @@ def choose_bgm() -> str:
         script = 'POSIX path of (choose file with prompt "选择 BGM 音频")'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "已取消选择。")
-        return result.stdout.strip()
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
     return choose_with_tkinter(kind="bgm")
 
 
@@ -1400,8 +1922,8 @@ def choose_folder() -> str:
         script = 'POSIX path of (choose folder with prompt "选择导出视频保存目录")'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "已取消选择。")
-        return result.stdout.strip()
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
     return choose_with_tkinter(kind="folder")
 
 
@@ -1416,8 +1938,8 @@ def choose_storyboard_output(video: Path) -> str:
         script = f'POSIX path of (choose file name with prompt "保存分镜脚本" default name "{default_name}")'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "已取消选择。")
-        return result.stdout.strip()
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
     return choose_with_tkinter(kind="storyboard", default_name=default_name)
 
 
@@ -1490,6 +2012,18 @@ def reveal_in_finder(path: Path) -> None:
         opener = shutil.which("xdg-open")
         if opener:
             subprocess.Popen([opener, str(path.parent)])
+
+
+def open_folder(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if is_macos():
+        subprocess.Popen(["open", str(path)])
+    elif is_windows():
+        subprocess.Popen(["explorer", str(path)])
+    else:
+        opener = shutil.which("xdg-open")
+        if opener:
+            subprocess.Popen([opener, str(path)])
 
 
 def response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -1669,7 +2203,7 @@ def package_templates() -> dict[str, dict]:
 
 def has_audio_stream(video: Path) -> bool:
     result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
-    return "Audio:" in result.stderr
+    return "Audio:" in safe_text(result.stderr)
 
 
 def media_duration_seconds(video: Path) -> float:
@@ -2010,6 +2544,11 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/previews/"):
             self.send_static(PREVIEWS / path.removeprefix("/previews/"), "video/mp4")
             return
+        if path.startswith("/generations/"):
+            file_path = GENERATIONS / path.removeprefix("/generations/")
+            content_type = "video/mp4" if file_path.suffix.lower() == ".mp4" else "image/png"
+            self.send_static(file_path, content_type)
+            return
         if path.startswith("/api/task/"):
             task_id = path.removeprefix("/api/task/")
             with TASK_LOCK:
@@ -2067,8 +2606,17 @@ class Handler(BaseHTTPRequestHandler):
                 response(self, 200, {"path": choose_logo()})
                 return
 
+            if self.path == "/api/pick-reference-image":
+                response(self, 200, {"path": choose_reference_image()})
+                return
+
             if self.path == "/api/pick-bgm":
                 response(self, 200, {"path": choose_bgm()})
+                return
+
+            if self.path == "/api/open-downloads":
+                open_folder(DOWNLOADS)
+                response(self, 200, {"path": str(DOWNLOADS)})
                 return
 
             if self.path == "/api/config":
@@ -2078,6 +2626,21 @@ class Handler(BaseHTTPRequestHandler):
                     value = str(payload.get("arkApiKey", "")).strip()
                     if value:
                         config["arkApiKey"] = value
+                if "apimartApiKey" in payload:
+                    value = str(payload.get("apimartApiKey", "")).strip()
+                    if value:
+                        config["apimartApiKey"] = value
+                if "apimartImageSize" in payload:
+                    config["apimartImageSize"] = str(payload.get("apimartImageSize", "9:16")).strip() or "9:16"
+                if "apimartImageResolution" in payload:
+                    config["apimartImageResolution"] = str(payload.get("apimartImageResolution", "1k")).strip() or "1k"
+                if "seedanceDuration" in payload:
+                    try:
+                        config["seedanceDuration"] = max(4, min(15, int(payload.get("seedanceDuration", 5))))
+                    except (TypeError, ValueError):
+                        config["seedanceDuration"] = 5
+                if "seedanceResolution" in payload:
+                    config["seedanceResolution"] = str(payload.get("seedanceResolution", "720p")).strip() or "720p"
                 if "ffmpegPath" in payload:
                     config["ffmpegPath"] = str(payload.get("ffmpegPath", "")).strip()
                 if "wecomWebhookUrl" in payload:
@@ -2086,12 +2649,34 @@ class Handler(BaseHTTPRequestHandler):
                     config["usageLogName"] = str(payload.get("usageLogName", "")).strip()
                 if "usageLogDept" in payload:
                     config["usageLogDept"] = str(payload.get("usageLogDept", "")).strip()
+                if "downloadRetentionDays" in payload:
+                    try:
+                        config["downloadRetentionDays"] = max(0, int(payload.get("downloadRetentionDays", 30)))
+                    except (TypeError, ValueError):
+                        config["downloadRetentionDays"] = 30
                 if "packageTemplate" in payload:
                     config["packageTemplate"] = str(payload.get("packageTemplate", "")).strip()
                 if "packageTemplates" in payload:
                     config["packageTemplates"] = normalize_package_templates(payload.get("packageTemplates"))
                 save_config(config)
+                cleanup_old_downloads()
                 response(self, 200, public_config())
+                return
+
+            if self.path == "/api/download-link":
+                payload = read_json(self)
+                share_text = str(payload.get("url", "")).strip()
+                if not share_text:
+                    response(self, 400, {"error": "请先粘贴抖音或小红书分享链接。"})
+                    return
+                share_url = extract_share_url(share_text)
+                notify_feature_used("下载分享视频", f"链接：{share_url}")
+                def worker(tid: str) -> dict:
+                    result = download_video_from_url(share_text, task_id=tid)
+                    append_history("下载分享视频", Path(result.get("path", "")), summary=f"来源：{result.get('url', '')}", duration=result.get("duration", ""))
+                    return result
+                task_id = start_task("下载分享视频", worker)
+                response(self, 200, {"taskId": task_id})
                 return
 
             if self.path == "/api/thumbs":
@@ -2197,6 +2782,35 @@ class Handler(BaseHTTPRequestHandler):
                 reveal_in_finder(output)
                 notify_feature_used("导出分镜脚本", f"视频：{video.name}，镜头数：{len(shots) if isinstance(shots, list) else 0}")
                 response(self, 200, {"path": str(output), "count": len(shots) if isinstance(shots, list) else 0})
+                return
+
+            if self.path == "/api/storyboard-images":
+                payload = read_json(self)
+                shots = payload.get("shots", [])
+                references = payload.get("references", [])
+                reference_description = str(payload.get("referenceDescription", "")).strip()[:1200]
+                config = load_config()
+                size = str(payload.get("size") or config.get("apimartImageSize") or "9:16")
+                resolution = str(payload.get("resolution") or config.get("apimartImageResolution") or "1k")
+                notify_feature_used("生成分镜图", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，参考图：{len(references) if isinstance(references, list) else 0}，比例：{size}，清晰度：{resolution}")
+                def worker(tid: str) -> dict:
+                    return generate_storyboard_images(shots, size=size, resolution=resolution, references_raw=references, reference_description=reference_description, task_id=tid)
+                task_id = start_task("生成分镜图", worker)
+                response(self, 200, {"taskId": task_id})
+                return
+
+            if self.path == "/api/storyboard-videos":
+                payload = read_json(self)
+                shots = payload.get("shots", [])
+                config = load_config()
+                duration = int(payload.get("duration") or config.get("seedanceDuration") or 5)
+                resolution = str(payload.get("resolution") or config.get("seedanceResolution") or "720p")
+                size = str(payload.get("size") or config.get("apimartImageSize") or "9:16")
+                notify_feature_used("生成视频片段", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，时长：{duration} 秒，清晰度：{resolution}")
+                def worker(tid: str) -> dict:
+                    return generate_storyboard_videos(shots, duration=duration, resolution=resolution, size=size, task_id=tid)
+                task_id = start_task("生成视频片段", worker)
+                response(self, 200, {"taskId": task_id})
                 return
 
             if self.path == "/api/preview":

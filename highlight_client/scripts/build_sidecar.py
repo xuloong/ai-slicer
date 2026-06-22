@@ -61,6 +61,8 @@ def main() -> None:
         "certifi",
         "--collect-binaries",
         "imageio_ffmpeg",
+        "--collect-all",
+        "yt_dlp",
         "server.py",
     ])
 
