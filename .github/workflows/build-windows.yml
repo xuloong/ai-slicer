@@ -29,6 +29,9 @@ jobs:
         run: python scripts\\build_sidecar.py
       - name: Build Tauri app
         run: npm run build -- --bundles nsis
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Upload Windows bundles
         uses: actions/upload-artifact@v4
         with:
