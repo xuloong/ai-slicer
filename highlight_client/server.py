@@ -1753,6 +1753,14 @@ def whisper_model_name() -> str:
     return (os.environ.get("WHISPER_MODEL") or private.get("WHISPER_MODEL") or "base").strip() or "base"
 
 
+def whisper_model_source() -> str:
+    model_name = whisper_model_name()
+    bundled = RESOURCE_ROOT / "models" / "whisper" / model_name
+    if bundled.exists():
+        return str(bundled)
+    return model_name
+
+
 def clean_transcript_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
     cleaned = re.sub(r"[\u200b-\u200f\ufeff]", "", cleaned)
@@ -1781,7 +1789,7 @@ def extract_audio_dialogue(video: Path, out_dir: Path, task_id: str | None = Non
         task_update(task_id, 22, "正在语音识别台词")
     try:
         model = WhisperModel(
-            whisper_model_name(),
+            whisper_model_source(),
             device="cpu",
             compute_type="int8",
             download_root=str(DATA_DIR / "models" / "whisper"),

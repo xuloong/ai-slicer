@@ -49,6 +49,8 @@ jobs:
           TLS_ACCESS_KEY_ID: ${{ secrets.TLS_ACCESS_KEY_ID }}
           TLS_SECRET_ACCESS_KEY: ${{ secrets.TLS_SECRET_ACCESS_KEY }}
           WHISPER_MODEL: ${{ secrets.WHISPER_MODEL }}
+          WHISPER_REPO_ID: ${{ secrets.WHISPER_REPO_ID }}
+          BUNDLE_WHISPER_MODEL: ${{ secrets.BUNDLE_WHISPER_MODEL }}
 
       - name: Build and publish Tauri release
         uses: tauri-apps/tauri-action@v1
@@ -110,6 +112,8 @@ jobs:
           TLS_ACCESS_KEY_ID: ${{ secrets.TLS_ACCESS_KEY_ID }}
           TLS_SECRET_ACCESS_KEY: ${{ secrets.TLS_SECRET_ACCESS_KEY }}
           WHISPER_MODEL: ${{ secrets.WHISPER_MODEL }}
+          WHISPER_REPO_ID: ${{ secrets.WHISPER_REPO_ID }}
+          BUNDLE_WHISPER_MODEL: ${{ secrets.BUNDLE_WHISPER_MODEL }}
 
       - name: Build and publish Tauri release
         uses: tauri-apps/tauri-action@v1

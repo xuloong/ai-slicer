@@ -15,6 +15,7 @@ DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 PRIVATE_CONFIG = ROOT / "private_config.json"
 PRIVATE_CONFIG_SAMPLE = ROOT / "private_config.sample.json"
+WHISPER_MODELS = ROOT / "models" / "whisper"
 
 
 def run(cmd: list[str], cwd: Path = ROOT) -> str:
@@ -72,11 +73,63 @@ def ensure_private_config() -> None:
         "TLS_ACCESS_KEY_ID",
         "TLS_SECRET_ACCESS_KEY",
         "WHISPER_MODEL",
+        "WHISPER_REPO_ID",
+        "BUNDLE_WHISPER_MODEL",
     ):
         value = os.environ.get(key, "").strip()
         if value:
             config[key] = value
     PRIVATE_CONFIG.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def private_config_value(key: str, default: str = "") -> str:
+    if os.environ.get(key, "").strip():
+        return os.environ[key].strip()
+    for candidate in (PRIVATE_CONFIG, PRIVATE_CONFIG_SAMPLE):
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    return default
+
+
+def truthy(value: str) -> bool:
+    return str(value or "").strip().lower() not in {"0", "false", "no", "off", "否"}
+
+
+def ensure_whisper_model() -> Path | None:
+    if not truthy(os.environ.get("BUNDLE_WHISPER_MODEL", "1")):
+        return None
+    model_name = private_config_value("WHISPER_MODEL", "base")
+    target = WHISPER_MODELS / model_name
+    required = ("model.bin", "config.json")
+    if target.exists() and all((target / name).exists() for name in required):
+        return target
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as exc:
+        raise SystemExit(f"无法下载 Whisper 模型：缺少 huggingface_hub，{exc}") from exc
+    repo_id = private_config_value("WHISPER_REPO_ID", f"Systran/faster-whisper-{model_name}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    print(f"downloading whisper model: {repo_id} -> {target}")
+    snapshot_download(
+        repo_id=repo_id,
+        local_dir=str(target),
+        local_dir_use_symlinks=False,
+        allow_patterns=[
+            "config.json",
+            "model.bin",
+            "tokenizer.json",
+            "vocabulary.*",
+            "preprocessor_config.json",
+        ],
+    )
+    return target
 
 
 def main() -> None:
@@ -85,11 +138,12 @@ def main() -> None:
         raise SystemExit("找不到 pyinstaller。请先运行：python -m pip install pyinstaller")
 
     ensure_private_config()
+    whisper_model = ensure_whisper_model()
     TAURI_BIN.mkdir(parents=True, exist_ok=True)
     sep = ";" if os.name == "nt" else ":"
     add_data = f"static{sep}static"
     private_config_data = f"private_config.json{sep}."
-    run([
+    command = [
         pyinstaller,
         "--clean",
         "--onefile",
@@ -99,6 +153,13 @@ def main() -> None:
         add_data,
         "--add-data",
         private_config_data,
+    ]
+    if whisper_model:
+        command.extend([
+            "--add-data",
+            f"{whisper_model}{sep}models/whisper/{whisper_model.name}",
+        ])
+    command.extend([
         "--collect-data",
         "certifi",
         "--collect-binaries",
@@ -117,6 +178,7 @@ def main() -> None:
         "tokenizers",
         "server.py",
     ])
+    run(command)
 
     suffix = ".exe" if os.name == "nt" else ""
     built = DIST / f"highlight-server{suffix}"
