@@ -1164,6 +1164,17 @@ button:hover {
   font-size: var(--text-sm);
 }
 
+.sectionActions select {
+  width: auto;
+  height: var(--control-compact);
+  min-height: var(--control-compact);
+  font-size: var(--text-sm);
+}
+
+.compactSelect {
+  min-width: 86px;
+}
+
 .sectionActions {
   display: flex;
   gap: 8px;

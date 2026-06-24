@@ -57,6 +57,7 @@ const seedanceSize = $("seedanceSize");
 const seedanceAudio = $("seedanceAudio");
 const applyStoryVideoDefaultsBtn = $("applyStoryVideoDefaultsBtn");
 const storyboardOutputDir = $("storyboardOutputDir");
+const storyboardModelMode = $("storyboardModelMode");
 const ffmpegPath = $("ffmpegPath");
 const downloadRetentionDays = $("downloadRetentionDays");
 const douyinCookie = $("douyinCookie");
@@ -1961,6 +1962,7 @@ $("storyboardBtn").addEventListener("click", async () => {
   try {
     await runTask("/api/storyboard", {
       path: videoPath.value,
+      modelMode: storyboardModelMode ? storyboardModelMode.value : "fast",
     }, (data) => {
       storyboardShots = data.shots || [];
       renderStoryboard(data.summary || `已生成 ${storyboardShots.length} 个分镜。`);

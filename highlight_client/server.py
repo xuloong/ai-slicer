@@ -2035,9 +2035,17 @@ def frame_data_url(video: Path, time: float, out_dir: Path, index: int, task_id:
     return f"data:image/jpeg;base64,{data}"
 
 
-def ark_model_candidates() -> list[str]:
+def normalize_ark_model_mode(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"fast", "precise"} else "fast"
+
+
+def ark_model_candidates(model_mode: str = "fast") -> list[str]:
     configured = os.environ.get("ARK_MODEL", "").strip()
-    candidates = [configured, ARK_PRIMARY_MODEL, ARK_FALLBACK_MODEL]
+    if normalize_ark_model_mode(model_mode) == "precise":
+        candidates = [configured, ARK_PRIMARY_MODEL, ARK_FALLBACK_MODEL]
+    else:
+        candidates = [configured, ARK_FALLBACK_MODEL, ARK_PRIMARY_MODEL]
     seen = set()
     result = []
     for model in candidates:
@@ -2105,9 +2113,9 @@ def call_ark_chat_with_model(model: str, content: list[dict], task_id: str | Non
     return safe_text(content_text)
 
 
-def call_ark_chat(content: list[dict], task_id: str | None = None) -> str:
+def call_ark_chat(content: list[dict], task_id: str | None = None, model_mode: str = "fast") -> str:
     last_error: Exception | None = None
-    candidates = ark_model_candidates()
+    candidates = ark_model_candidates(model_mode)
     for index, model in enumerate(candidates):
         try:
             if task_id:
@@ -2492,7 +2500,7 @@ def normalize_storyboard(raw: object, duration: float) -> list[dict]:
     return shots
 
 
-def analyze_ai_storyboard_by_video_url(video: Path, requirement: str = "", task_id: str | None = None) -> dict:
+def analyze_ai_storyboard_by_video_url(video: Path, requirement: str = "", task_id: str | None = None, model_mode: str = "fast") -> dict:
     duration = media_duration_seconds(video)
     if duration <= 0:
         raise RuntimeError("无法读取原片时长。")
@@ -2508,7 +2516,7 @@ def analyze_ai_storyboard_by_video_url(video: Path, requirement: str = "", task_
     ]
     if task_id:
         task_update(task_id, 32, "正在调用豆包直接解析完整视频")
-    ai = parse_ai_json(call_ark_chat(content, task_id=task_id))
+    ai = parse_ai_json(call_ark_chat(content, task_id=task_id, model_mode=model_mode))
     shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
     if not shots:
         raise RuntimeError("豆包未基于完整视频返回可用分镜。")
@@ -2521,9 +2529,9 @@ def analyze_ai_storyboard_by_video_url(video: Path, requirement: str = "", task_
     }
 
 
-def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | None = None) -> dict:
+def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | None = None, model_mode: str = "fast") -> dict:
     try:
-        return analyze_ai_storyboard_by_video_url(video, requirement=requirement, task_id=task_id)
+        return analyze_ai_storyboard_by_video_url(video, requirement=requirement, task_id=task_id, model_mode=model_mode)
     except Exception as direct_exc:
         fallback_reason = compact_log_text(direct_exc, 260)
         if task_id:
@@ -2549,7 +2557,7 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
             content.append({"type": "image_url", "image_url": {"url": data_url}})
     if task_id:
         task_update(task_id, 82, "正在调用豆包生成分镜脚本")
-    ai = parse_ai_json(call_ark_chat(content, task_id=task_id))
+    ai = parse_ai_json(call_ark_chat(content, task_id=task_id, model_mode=model_mode))
     if task_id:
         task_update(task_id, 96, "正在整理分镜脚本")
     shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
@@ -2562,8 +2570,9 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
                 shot["dialogue"] = text
     return {
         "shots": shots,
-        "summary": (ai.get("summary") or f"已根据视频内容生成 {len(shots)} 个分镜。") + f"（完整视频直传失败，已回退抽帧分析：{fallback_reason}）",
+        "summary": ai.get("summary") or f"已根据视频内容生成 {len(shots)} 个分镜。",
         "duration": seconds_to_clock(duration),
+        "directVideoFallback": fallback_reason,
     }
 
 
@@ -4266,16 +4275,18 @@ class Handler(BaseHTTPRequestHandler):
                 payload = read_json(self)
                 video = Path(payload.get("path", "")).expanduser()
                 requirement = str(payload.get("requirement", "")).strip()[:1000]
+                model_mode = normalize_ark_model_mode(payload.get("modelMode"))
                 if not video.exists():
                     response(self, 400, {"error": "视频文件不存在。"})
                     return
-                detail = f"视频：{video.name}"
+                model_label = "精细" if model_mode == "precise" else "快速"
+                detail = f"视频：{video.name}，模式：{model_label}"
                 if requirement:
                     detail += f"，要求：{requirement}"
                 notify_feature_used("生成分镜脚本", detail)
                 def worker(tid: str) -> dict:
-                    result = analyze_ai_storyboard(video, requirement=requirement, task_id=tid)
-                    append_history("生成分镜脚本", video, summary=result.get("summary", ""), duration=result.get("duration", ""), requirement=requirement, storyboard=result.get("shots", [])[:24])
+                    result = analyze_ai_storyboard(video, requirement=requirement, task_id=tid, model_mode=model_mode)
+                    append_history("生成分镜脚本", video, summary=result.get("summary", ""), duration=result.get("duration", ""), requirement=requirement, storyboard=result.get("shots", [])[:24], modelMode=model_mode)
                     return result
                 task_id = start_task("生成分镜脚本", worker)
                 response(self, 200, {"taskId": task_id})
