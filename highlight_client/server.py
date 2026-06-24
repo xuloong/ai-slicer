@@ -80,6 +80,7 @@ PREVIEWS = DATA_DIR / "previews"
 DOWNLOADS = DATA_DIR / "downloads"
 GENERATIONS = DATA_DIR / "generations"
 CONFIG_FILE = DATA_DIR / "user_config.json"
+PRIVATE_CONFIG_FILE = DATA_DIR / "private_config.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 ARK_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 ARK_PRIMARY_MODEL = "doubao-seed-2-1-turbo-260628"
@@ -155,6 +156,16 @@ def load_config() -> dict:
 
 def save_config(config: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_private_config() -> dict:
+    if not PRIVATE_CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(PRIVATE_CONFIG_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def default_package_templates() -> dict[str, dict]:
@@ -414,14 +425,15 @@ def notify_wecom(content: str) -> None:
 
 
 def tls_config() -> dict[str, object]:
+    private = load_private_config()
     return {
-        "endpoint": (os.environ.get("TLS_ENDPOINT") or DEFAULT_TLS_ENDPOINT).strip(),
-        "region": (os.environ.get("TLS_REGION") or DEFAULT_TLS_REGION).strip() or DEFAULT_TLS_REGION,
-        "project_name": (os.environ.get("TLS_PROJECT_NAME") or DEFAULT_TLS_PROJECT_NAME).strip() or DEFAULT_TLS_PROJECT_NAME,
-        "topic_name": (os.environ.get("TLS_TOPIC_NAME") or DEFAULT_TLS_TOPIC_NAME).strip() or DEFAULT_TLS_TOPIC_NAME,
+        "endpoint": (os.environ.get("TLS_ENDPOINT") or private.get("TLS_ENDPOINT") or DEFAULT_TLS_ENDPOINT).strip(),
+        "region": (os.environ.get("TLS_REGION") or private.get("TLS_REGION") or DEFAULT_TLS_REGION).strip() or DEFAULT_TLS_REGION,
+        "project_name": (os.environ.get("TLS_PROJECT_NAME") or private.get("TLS_PROJECT_NAME") or DEFAULT_TLS_PROJECT_NAME).strip() or DEFAULT_TLS_PROJECT_NAME,
+        "topic_name": (os.environ.get("TLS_TOPIC_NAME") or private.get("TLS_TOPIC_NAME") or DEFAULT_TLS_TOPIC_NAME).strip() or DEFAULT_TLS_TOPIC_NAME,
         "ttl": int(os.environ.get("TLS_TTL_DAYS") or DEFAULT_TLS_TTL_DAYS),
-        "access_key": (os.environ.get("TLS_ACCESS_KEY_ID") or os.environ.get("TOS_ACCESS_KEY_ID") or DEFAULT_TOS_ACCESS_KEY_ID).strip(),
-        "secret_key": (os.environ.get("TLS_SECRET_ACCESS_KEY") or os.environ.get("TOS_SECRET_ACCESS_KEY") or DEFAULT_TOS_SECRET_ACCESS_KEY).strip(),
+        "access_key": (os.environ.get("TLS_ACCESS_KEY_ID") or os.environ.get("TOS_ACCESS_KEY_ID") or private.get("TLS_ACCESS_KEY_ID") or private.get("TOS_ACCESS_KEY_ID") or DEFAULT_TOS_ACCESS_KEY_ID).strip(),
+        "secret_key": (os.environ.get("TLS_SECRET_ACCESS_KEY") or os.environ.get("TOS_SECRET_ACCESS_KEY") or private.get("TLS_SECRET_ACCESS_KEY") or private.get("TOS_SECRET_ACCESS_KEY") or DEFAULT_TOS_SECRET_ACCESS_KEY).strip(),
     }
 
 
@@ -554,23 +566,24 @@ def compact_log_text(value: object, limit: int = 700) -> str:
 
 
 def tos_config() -> dict[str, str]:
-    endpoint = (os.environ.get("TOS_ENDPOINT") or DEFAULT_TOS_ENDPOINT).strip().rstrip("/")
+    private = load_private_config()
+    endpoint = (os.environ.get("TOS_ENDPOINT") or private.get("TOS_ENDPOINT") or DEFAULT_TOS_ENDPOINT).strip().rstrip("/")
     if endpoint and not endpoint.startswith(("http://", "https://")):
         endpoint = f"https://{endpoint}"
-    bucket = (os.environ.get("TOS_BUCKET") or DEFAULT_TOS_BUCKET).strip()
-    access_key = (os.environ.get("TOS_ACCESS_KEY_ID") or DEFAULT_TOS_ACCESS_KEY_ID).strip()
-    secret_key = (os.environ.get("TOS_SECRET_ACCESS_KEY") or DEFAULT_TOS_SECRET_ACCESS_KEY).strip()
-    region = (os.environ.get("TOS_REGION") or DEFAULT_TOS_REGION).strip() or DEFAULT_TOS_REGION
+    bucket = (os.environ.get("TOS_BUCKET") or private.get("TOS_BUCKET") or DEFAULT_TOS_BUCKET).strip()
+    access_key = (os.environ.get("TOS_ACCESS_KEY_ID") or private.get("TOS_ACCESS_KEY_ID") or DEFAULT_TOS_ACCESS_KEY_ID).strip()
+    secret_key = (os.environ.get("TOS_SECRET_ACCESS_KEY") or private.get("TOS_SECRET_ACCESS_KEY") or DEFAULT_TOS_SECRET_ACCESS_KEY).strip()
+    region = (os.environ.get("TOS_REGION") or private.get("TOS_REGION") or DEFAULT_TOS_REGION).strip() or DEFAULT_TOS_REGION
     return {
         "endpoint": endpoint,
         "bucket": bucket,
         "access_key": access_key,
         "secret_key": secret_key,
         "region": region,
-        "service": os.environ.get("TOS_SERVICE", "tos").strip() or "tos",
-        "prefix": os.environ.get("TOS_OBJECT_PREFIX", DEFAULT_TOS_OBJECT_PREFIX).strip().strip("/") or DEFAULT_TOS_OBJECT_PREFIX,
-        "public_base_url": (os.environ.get("TOS_PUBLIC_BASE_URL") or DEFAULT_TOS_PUBLIC_BASE_URL).strip().rstrip("/"),
-        "acl": os.environ.get("TOS_ACL", "").strip(),
+        "service": (os.environ.get("TOS_SERVICE") or private.get("TOS_SERVICE") or "tos").strip() or "tos",
+        "prefix": (os.environ.get("TOS_OBJECT_PREFIX") or private.get("TOS_OBJECT_PREFIX") or DEFAULT_TOS_OBJECT_PREFIX).strip().strip("/") or DEFAULT_TOS_OBJECT_PREFIX,
+        "public_base_url": (os.environ.get("TOS_PUBLIC_BASE_URL") or private.get("TOS_PUBLIC_BASE_URL") or DEFAULT_TOS_PUBLIC_BASE_URL).strip().rstrip("/"),
+        "acl": (os.environ.get("TOS_ACL") or private.get("TOS_ACL") or "").strip(),
     }
 
 
