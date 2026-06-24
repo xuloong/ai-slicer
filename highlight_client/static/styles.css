@@ -448,6 +448,13 @@ button:hover {
   margin-right: auto;
 }
 
+.settingsUpdateRow .updateState {
+  flex: 1;
+  min-width: 160px;
+  color: #607069;
+  text-align: right;
+}
+
 .templateStyleRow {
   display: grid;
   grid-template-columns: minmax(220px, 320px) auto minmax(260px, 1fr);
@@ -2036,6 +2043,11 @@ button:hover {
   .settingsUpdateRow .settingsVersion {
     width: 100%;
     margin-right: 0;
+  }
+
+  .settingsUpdateRow .updateState {
+    width: 100%;
+    text-align: left;
   }
 
   .templateStyleRow .templateActions,

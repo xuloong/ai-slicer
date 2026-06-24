@@ -14,6 +14,7 @@ const logoutBtn = $("logoutBtn");
 const appVersion = $("appVersion");
 const settingsVersion = $("settingsVersion");
 const checkUpdateBtn = $("checkUpdateBtn");
+const updateState = $("updateState");
 const videoPath = $("videoPath");
 const shareUrl = $("shareUrl");
 const info = $("info");
@@ -1013,29 +1014,29 @@ function tauriInvoke() {
 async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
   const invoke = tauriInvoke();
   if (!invoke) {
-    if (!silent) configState.textContent = "自动更新仅在安装后的客户端中可用。";
+    if (!silent && updateState) updateState.textContent = "自动更新仅在安装后的客户端中可用。";
     return;
   }
   if (checkUpdateBtn) checkUpdateBtn.disabled = true;
-  if (!silent) configState.textContent = "正在检查更新...";
+  if (!silent && updateState) updateState.textContent = "正在检查更新...";
   try {
     const version = await invoke("check_for_update");
     if (!version) {
-      if (!silent) configState.textContent = "当前已是最新版本";
+      if (!silent && updateState) updateState.textContent = "当前已是最新版本";
       return;
     }
     if (!autoInstall) {
       const shouldInstall = window.confirm(`发现新版本 v${version}，是否现在更新？`);
       if (!shouldInstall) {
-        configState.textContent = `发现新版本 v${version}，稍后可在设置中更新。`;
+        if (updateState) updateState.textContent = `发现新版本 v${version}，稍后可在设置中更新。`;
         return;
       }
     }
-    configState.textContent = `正在下载并安装 v${version}...`;
+    if (!silent && updateState) updateState.textContent = `正在下载并安装 v${version}...`;
     const message = await invoke("install_update_if_available");
-    configState.textContent = message || "更新已安装，正在重启";
+    if (!silent && updateState) updateState.textContent = message || "更新已安装，正在重启";
   } catch (error) {
-    if (!silent) configState.textContent = `检查更新失败：${error?.message || error}`;
+    if (!silent && updateState) updateState.textContent = `检查更新失败：${error?.message || error}`;
   } finally {
     if (checkUpdateBtn) checkUpdateBtn.disabled = false;
   }
