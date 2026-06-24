@@ -82,7 +82,8 @@ GENERATIONS = DATA_DIR / "generations"
 CONFIG_FILE = DATA_DIR / "user_config.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 ARK_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-ARK_MODEL = "doubao-seed-2-1-turbo"
+ARK_PRIMARY_MODEL = "doubao-seed-2-1-turbo"
+ARK_FALLBACK_MODEL = "doubao-seed-2-0-pro-260215"
 APIMART_IMAGE_URL = "https://api.apimart.ai/v1/images/generations"
 APIMART_VIDEO_URL = "https://api.apimart.ai/v1/videos/generations"
 APIMART_TASK_URL = "https://api.apimart.ai/v1/tasks"
@@ -2034,10 +2035,39 @@ def frame_data_url(video: Path, time: float, out_dir: Path, index: int, task_id:
     return f"data:image/jpeg;base64,{data}"
 
 
-def call_ark_chat(content: list[dict], task_id: str | None = None) -> str:
+def ark_model_candidates() -> list[str]:
+    configured = os.environ.get("ARK_MODEL", "").strip()
+    candidates = [configured, ARK_PRIMARY_MODEL, ARK_FALLBACK_MODEL]
+    seen = set()
+    result = []
+    for model in candidates:
+        if model and model not in seen:
+            seen.add(model)
+            result.append(model)
+    return result
+
+
+def is_ark_model_unavailable(status: int, detail: str) -> bool:
+    if status == 404:
+        return True
+    lowered = detail.lower()
+    return "invalidendpointormodel" in lowered or "does not exist" in lowered or "do not have access" in lowered
+
+
+def task_progress_value(task_id: str | None, fallback: int = 80) -> int:
+    if not task_id:
+        return fallback
+    with TASK_LOCK:
+        try:
+            return int(TASKS.get(task_id, {}).get("progress", fallback))
+        except (TypeError, ValueError):
+            return fallback
+
+
+def call_ark_chat_with_model(model: str, content: list[dict], task_id: str | None = None) -> str:
     ensure_not_cancelled(task_id)
     payload = {
-        "model": ARK_MODEL,
+        "model": model,
         "messages": [
             {
                 "role": "system",
@@ -2073,6 +2103,25 @@ def call_ark_chat(content: list[dict], task_id: str | None = None) -> str:
     if not safe_text(content_text).strip():
         raise RuntimeError("火山方舟接口返回了空内容，请稍后重试或检查 API Key / 模型权限。")
     return safe_text(content_text)
+
+
+def call_ark_chat(content: list[dict], task_id: str | None = None) -> str:
+    last_error: Exception | None = None
+    candidates = ark_model_candidates()
+    for index, model in enumerate(candidates):
+        try:
+            if task_id:
+                task_update(task_id, task_progress_value(task_id), f"正在调用豆包模型：{model}")
+            return call_ark_chat_with_model(model, content, task_id=task_id)
+        except RuntimeError as exc:
+            last_error = exc
+            message = str(exc)
+            if index < len(candidates) - 1 and is_ark_model_unavailable(404 if "HTTP 404" in message else 0, message):
+                if task_id:
+                    task_update(task_id, task_progress_value(task_id), f"模型 {model} 暂不可用，正在回退到兼容模型")
+                continue
+            raise
+    raise last_error or RuntimeError("火山方舟接口请求失败。")
 
 
 def parse_ai_json(text: object) -> dict:
@@ -2164,7 +2213,7 @@ def analyze_ai_highlights(
             content.append({"type": "image_url", "image_url": {"url": data_url}})
 
     if task_id:
-        task_update(task_id, 94, "正在调用豆包 Seed 2.1 Turbo")
+        task_update(task_id, 94, "正在调用豆包模型")
     ai_text = call_ark_chat(content, task_id=task_id)
     if task_id:
         task_update(task_id, 98, "正在解析 AI 返回结果")

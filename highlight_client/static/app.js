@@ -1830,7 +1830,7 @@ $("autoBtn").addEventListener("click", async () => {
 
 $("aiAutoBtn").addEventListener("click", async () => {
   switchContentTab("highlight");
-  autoSummary.textContent = "正在本地粗筛候选段落，并调用豆包 Seed 2.1 Turbo 做剧情高光判断...";
+  autoSummary.textContent = "正在本地粗筛候选段落，并调用豆包模型做剧情高光判断...";
   try {
     await runTask("/api/ai-auto", {
       path: videoPath.value,
