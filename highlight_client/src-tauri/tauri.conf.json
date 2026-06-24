@@ -10,6 +10,7 @@
     "frontendDist": "../tauri-dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "AI短视频创作工具",

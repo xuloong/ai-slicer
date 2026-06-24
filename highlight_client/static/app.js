@@ -1003,7 +1003,11 @@ async function enterAppAfterLogin(user = {}) {
 }
 
 function tauriInvoke() {
-  return window.__TAURI__?.core?.invoke || window.__TAURI__?.tauri?.invoke || null;
+  const globalInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.tauri?.invoke;
+  if (globalInvoke) return globalInvoke;
+  const internalInvoke = window.__TAURI_INTERNALS__?.invoke;
+  if (internalInvoke) return (cmd, args) => internalInvoke(cmd, args);
+  return null;
 }
 
 async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
