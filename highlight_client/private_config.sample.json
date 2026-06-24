@@ -1,0 +1,15 @@
+{
+  "ARK_API_KEY": "",
+  "APIMART_API_KEY": "",
+  "TOS_ENDPOINT": "tos-cn-shanghai.volces.com",
+  "TOS_REGION": "cn-shanghai",
+  "TOS_BUCKET": "aivideo-topsky",
+  "TOS_ACCESS_KEY_ID": "",
+  "TOS_SECRET_ACCESS_KEY": "",
+  "TOS_PUBLIC_BASE_URL": "https://aivideo-topsky.tos-cn-shanghai.volces.com",
+  "TOS_OBJECT_PREFIX": "ai-short-video-generations",
+  "TLS_ENDPOINT": "https://tls-cn-shanghai.volces.com",
+  "TLS_REGION": "cn-shanghai",
+  "TLS_PROJECT_NAME": "aivideo",
+  "TLS_TOPIC_NAME": "client-usage"
+}

@@ -27,6 +27,22 @@ jobs:
         run: npm install
       - name: Build sidecar
         run: python scripts\\build_sidecar.py
+        env:
+          ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
+          APIMART_API_KEY: ${{ secrets.APIMART_API_KEY }}
+          TOS_ENDPOINT: ${{ secrets.TOS_ENDPOINT }}
+          TOS_REGION: ${{ secrets.TOS_REGION }}
+          TOS_BUCKET: ${{ secrets.TOS_BUCKET }}
+          TOS_ACCESS_KEY_ID: ${{ secrets.TOS_ACCESS_KEY_ID }}
+          TOS_SECRET_ACCESS_KEY: ${{ secrets.TOS_SECRET_ACCESS_KEY }}
+          TOS_PUBLIC_BASE_URL: ${{ secrets.TOS_PUBLIC_BASE_URL }}
+          TOS_OBJECT_PREFIX: ${{ secrets.TOS_OBJECT_PREFIX }}
+          TLS_ENDPOINT: ${{ secrets.TLS_ENDPOINT }}
+          TLS_REGION: ${{ secrets.TLS_REGION }}
+          TLS_PROJECT_NAME: ${{ secrets.TLS_PROJECT_NAME }}
+          TLS_TOPIC_NAME: ${{ secrets.TLS_TOPIC_NAME }}
+          TLS_ACCESS_KEY_ID: ${{ secrets.TLS_ACCESS_KEY_ID }}
+          TLS_SECRET_ACCESS_KEY: ${{ secrets.TLS_SECRET_ACCESS_KEY }}
       - name: Disable updater artifact signing for installer artifact
         shell: pwsh
         run: |

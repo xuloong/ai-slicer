@@ -38,7 +38,8 @@
       "binaries/highlight-server"
     ],
     "resources": [
-      "../README.md"
+      "../README.md",
+      "../private_config.json"
     ],
     "macOS": {
       "signingIdentity": "-",

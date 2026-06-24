@@ -81,6 +81,7 @@ DOWNLOADS = DATA_DIR / "downloads"
 GENERATIONS = DATA_DIR / "generations"
 CONFIG_FILE = DATA_DIR / "user_config.json"
 PRIVATE_CONFIG_FILE = DATA_DIR / "private_config.json"
+BUNDLED_PRIVATE_CONFIG_FILE = RESOURCE_ROOT / "private_config.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 ARK_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 ARK_PRIMARY_MODEL = "doubao-seed-2-1-turbo-260628"
@@ -105,8 +106,8 @@ WECOM_QR_CONNECT_URL = (
 )
 WECOM_LOGIN_URL = "https://sso.topsky.com/api/login/{code}"
 DEFAULT_WECOM_WEBHOOK_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=e4a0df23-add9-4573-bcea-c606b9fac46a"
-DEFAULT_ARK_API_KEY = "ark-8d0e9805-035e-4994-ba45-a09c7b51047c-34053"
-DEFAULT_APIMART_API_KEY = "sk-rDsvyPdgzs1JpBmr7Y56lbtZjTxm36NTlE58iaTgrDq21AMA"
+DEFAULT_ARK_API_KEY = ""
+DEFAULT_APIMART_API_KEY = ""
 DEFAULT_TOS_ENDPOINT = "https://tos-cn-shanghai.volces.com"
 DEFAULT_TOS_REGION = "cn-shanghai"
 DEFAULT_TOS_BUCKET = "aivideo-topsky"
@@ -159,13 +160,17 @@ def save_config(config: dict) -> None:
 
 
 def load_private_config() -> dict:
-    if not PRIVATE_CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(PRIVATE_CONFIG_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    merged: dict = {}
+    for candidate in (BUNDLED_PRIVATE_CONFIG_FILE, PRIVATE_CONFIG_FILE):
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            merged.update({key: value for key, value in data.items() if value not in {"", None}})
+    return merged
 
 
 def default_package_templates() -> dict[str, dict]:
@@ -278,11 +283,13 @@ def storyboard_history_with_generated(all_shots: object, generated: list[dict], 
 
 
 def ark_api_key_value(config: dict | None = None) -> str:
-    return os.environ.get("ARK_API_KEY") or DEFAULT_ARK_API_KEY
+    private = load_private_config()
+    return os.environ.get("ARK_API_KEY") or str(private.get("ARK_API_KEY") or "") or DEFAULT_ARK_API_KEY
 
 
 def apimart_api_key_value(config: dict | None = None) -> str:
-    return os.environ.get("APIMART_API_KEY") or DEFAULT_APIMART_API_KEY
+    private = load_private_config()
+    return os.environ.get("APIMART_API_KEY") or str(private.get("APIMART_API_KEY") or "") or DEFAULT_APIMART_API_KEY
 
 
 def public_config() -> dict:
