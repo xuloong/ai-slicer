@@ -7,11 +7,37 @@
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <main class="app">
+  <section id="loginGate" class="loginGate" hidden>
+    <div class="loginCard">
+      <div class="brandTitle loginBrand">
+        <img src="/static/app-logo.png" alt="AI短视频创作工具 LOGO">
+        <div>
+          <h1>AI短视频创作工具</h1>
+          <p>请使用企业微信扫码登录后继续使用。</p>
+        </div>
+      </div>
+      <div class="loginQrBox">
+        <div id="wecomLoginFrame" class="wecomLoginMount" title="企业微信扫码登录"></div>
+      </div>
+      <div id="loginState" class="loginState">正在准备企业微信二维码...</div>
+    </div>
+  </section>
+
+  <main id="appShell" class="app" hidden>
     <section class="panel setup">
+      <div class="loginUserBar">
+        <span id="loginUserInfo" class="loginUserInfo">未登录</span>
+        <button id="logoutBtn" class="logoutBtn" type="button">退出</button>
+      </div>
       <div>
-        <h1>AI短视频创作工具</h1>
+        <div class="brandTitle">
+          <img src="/static/app-logo.png" alt="AI短视频创作工具 LOGO">
+          <div>
+            <h1>AI短视频创作工具</h1>
+          </div>
+        </div>
         <p>从视频素材到分镜、生成与成片，一站式完成短视频创作。</p>
+        <div id="appVersion" class="appVersion">版本 v0.1.1</div>
       </div>
       <div class="sourceGrid">
         <label class="field shareField">
@@ -70,8 +96,7 @@
             <h2>分镜脚本</h2>
             <div class="sectionActions">
               <button id="storyboardBtn" type="button">生成分镜脚本</button>
-              <button id="storyboardImagesBtn" type="button">生成分镜图</button>
-              <button id="storyboardVideosBtn" type="button">生成视频片段</button>
+              <button id="saveStoryboardEditsBtn" type="button">保存修改</button>
               <button id="exportStoryboardBtn" type="button">导出分镜</button>
             </div>
           </div>
@@ -80,15 +105,107 @@
             <div class="referenceHead">
               <strong>分镜图参考图 <span id="storyboardRefCount">0/16</span></strong>
               <div class="referenceActions">
+                <label class="inline">
+                  <span>比例</span>
+                  <select id="apimartImageSize">
+                    <option value="9:16">9:16</option>
+                    <option value="16:9">16:9</option>
+                    <option value="1:1">1:1</option>
+                    <option value="3:4">3:4</option>
+                    <option value="4:3">4:3</option>
+                    <option value="auto">自动</option>
+                  </select>
+                </label>
+                <label class="inline">
+                  <span>清晰度</span>
+                  <select id="apimartImageResolution">
+                    <option value="1k">1K</option>
+                    <option value="2k">2K</option>
+                    <option value="4k">4K</option>
+                  </select>
+                </label>
+                <label class="inline">
+                  <span>质量</span>
+                  <select id="apimartImageQuality">
+                    <option value="auto">自动</option>
+                    <option value="low">低</option>
+                    <option value="medium" selected>中</option>
+                    <option value="high">高</option>
+                  </select>
+                </label>
                 <button id="addStoryboardRefBtn" type="button">上传图片</button>
-                <button id="clearStoryboardRefsBtn" type="button">清空</button>
+                <button id="generateStoryboardRefsBtn" type="button">AI生成参考图</button>
+                <button id="storyboardImagesBtn" type="button">生成分镜图</button>
               </div>
+            </div>
+            <div class="referenceListHead">
+              <span>参考图</span>
+              <button id="clearStoryboardRefsBtn" type="button">清空参考图</button>
             </div>
             <div id="storyboardRefsList" class="referenceList empty">可上传人物、场景、商品或风格参考图，最多 16 张。</div>
             <label class="field referenceDescription">
               <span>参考图说明</span>
               <textarea id="storyboardRefDescription" rows="3" placeholder="例如：第1张是女主形象，第2张是男主形象，第3张是客厅场景，第4张是产品外观。生成时保持人物、场景和风格一致。"></textarea>
             </label>
+          </div>
+          <div class="storyVideoDefaults">
+            <strong>视频生成参数</strong>
+            <label class="inline">
+              <span>兜底时长</span>
+              <input id="seedanceDuration" type="number" min="4" max="15" value="5">
+              <span>秒</span>
+            </label>
+            <label class="inline">
+              <span>默认清晰度</span>
+              <select id="seedanceResolution">
+                <option value="480p">480p</option>
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+              </select>
+            </label>
+            <label class="inline">
+              <span>默认比例</span>
+              <select id="seedanceSize">
+                <option value="adaptive">自适应</option>
+                <option value="9:16">9:16</option>
+                <option value="16:9">16:9</option>
+                <option value="1:1">1:1</option>
+                <option value="3:4">3:4</option>
+                <option value="4:3">4:3</option>
+                <option value="21:9">21:9</option>
+              </select>
+            </label>
+            <label class="inline storyAudioToggle">
+              <input id="seedanceAudio" type="checkbox" checked>
+              <span>生成声音</span>
+            </label>
+            <button id="applyStoryVideoDefaultsBtn" type="button">应用到所有镜头</button>
+          </div>
+          <div class="storyVideoReferencePanel">
+            <div class="referenceListHead">
+              <span>视频参考素材</span>
+              <button id="clearStoryVideoRefsBtn" type="button">清空参考素材</button>
+            </div>
+            <div class="referenceActions videoReferenceActions">
+              <button id="useGeneratedVideosBtn" type="button">使用已生成视频</button>
+              <button id="addStoryVideoRefImageBtn" type="button">上传参考图</button>
+              <button id="addStoryVideoRefVideoBtn" type="button">上传参考视频</button>
+              <button id="addStoryVideoRefAudioBtn" type="button">上传参考声音</button>
+            </div>
+            <div id="storyVideoRefsList" class="videoReferenceList empty">可添加参考图、参考视频或参考声音，用于 Seedance2.0 生成分镜视频。</div>
+          </div>
+          <div class="storyExportTools">
+            <label class="field exportDir">
+              <span>导出目录</span>
+              <span class="pathPicker">
+                <input id="storyboardOutputDir" placeholder="默认保存到工具 exports 目录">
+                <button id="pickStoryboardDirBtn" type="button">选择目录</button>
+              </span>
+            </label>
+            <div class="inlineActions exportButtons">
+              <button id="mergeStoryboardVideosBtn" type="button">合并分镜视频</button>
+              <button id="exportStoryboardVideosBtn" type="button">导出分镜视频</button>
+            </div>
           </div>
           <div id="storyboardList" class="storyboardList empty">生成后会在这里展示镜号、时间、画面、景别、运镜、字幕和剪辑建议。</div>
         </section>
@@ -199,6 +316,19 @@
     </section>
   </main>
 
+  <div id="mediaModal" class="modal mediaModal" hidden>
+    <div class="mediaModalPanel">
+      <div class="mediaModalHead">
+        <strong id="mediaModalTitle">预览</strong>
+        <div class="mediaModalActions">
+          <a id="mediaModalDownload" href="#" download hidden>下载</a>
+          <button id="closeMediaModalBtn" class="iconBtn" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+      </div>
+      <div id="mediaModalBody" class="mediaModalBody"></div>
+    </div>
+  </div>
+
   <div id="settingsModal" class="modal" hidden>
     <div class="modalPanel">
       <div class="sectionHead">
@@ -207,73 +337,31 @@
       </div>
       <div id="setupHint" class="setupHint" hidden></div>
       <div class="settingsGrid">
-        <label class="field">
-          <span>火山方舟 API Key</span>
-          <input id="arkApiKey" type="password" placeholder="仅保存在本机配置文件中">
-        </label>
-        <label class="field">
-          <span>ffmpeg 路径</span>
-          <span class="pathPicker">
-            <input id="ffmpegPath" placeholder="留空则自动检测 PATH / 常见安装路径">
-            <button id="pickFfmpegBtn" type="button">选择</button>
-          </span>
-        </label>
-        <label class="field settingsWide">
-          <span>使用日志 Webhook</span>
-          <input id="wecomWebhookUrl" placeholder="用于功能使用通知，仅保存在本机">
-        </label>
-        <div class="settingsDivider settingsWide">AI 生成配置</div>
-        <label class="field settingsWide">
-          <span>APIMart API Key（GPT-Image-2 / Seedance2.0）</span>
-          <input id="apimartApiKey" type="password" placeholder="仅保存在本机配置文件中">
-        </label>
-        <label class="field">
-          <span>分镜图比例</span>
-          <select id="apimartImageSize">
-            <option value="9:16">9:16 竖屏</option>
-            <option value="16:9">16:9 横屏</option>
-            <option value="1:1">1:1 方形</option>
-            <option value="3:4">3:4 竖版</option>
-            <option value="4:3">4:3 横版</option>
-            <option value="auto">自动</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>分镜图清晰度</span>
-          <select id="apimartImageResolution">
-            <option value="1k">1K</option>
-            <option value="2k">2K</option>
-            <option value="4k">4K</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>视频片段时长</span>
-          <input id="seedanceDuration" type="number" min="4" max="15" value="5">
-        </label>
-        <label class="field">
-          <span>视频片段清晰度</span>
-          <select id="seedanceResolution">
-            <option value="480p">480p</option>
-            <option value="720p">720p</option>
-            <option value="1080p">1080p</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>姓名</span>
-          <input id="usageLogName" placeholder="例如：张三">
-        </label>
-        <label class="field">
-          <span>部门</span>
-          <input id="usageLogDept" placeholder="例如：内容团队">
-        </label>
-        <label class="field">
-          <span>下载视频保留天数</span>
-          <input id="downloadRetentionDays" type="number" min="0" max="365" value="30">
-        </label>
-        <div class="settingsInlineAction">
+        <div class="settingsMediaToolsRow">
+          <label class="field ffmpegPathField">
+            <span>ffmpeg 路径</span>
+            <span class="pathPicker">
+              <input id="ffmpegPath" placeholder="留空则自动检测 PATH / 常见安装路径">
+              <button id="pickFfmpegBtn" type="button">选择</button>
+            </span>
+          </label>
+          <label class="field retentionDaysField">
+            <span>下载视频保留天数</span>
+            <input id="downloadRetentionDays" type="number" min="0" max="365" value="30">
+          </label>
           <button id="openDownloadsBtn" type="button">查看下载目录</button>
+          <small id="ffmpegDetected" class="detectedText ffmpegDetectedRow"></small>
         </div>
-        <div class="settingsDivider settingsWide">模板配置</div>
+        <label class="field settingsWide">
+          <span>抖音 Cookie</span>
+          <textarea id="douyinCookie" rows="3" placeholder="抖音下载失败时粘贴浏览器请求里的 Cookie；留空则保留已有配置"></textarea>
+          <small>当下载抖音视频提示需要登录或 Cookie 时：在浏览器打开并登录抖音，按 F12 打开开发者工具，进入 Network 后刷新页面，点击任意 douyin.com 请求，在 Request Headers 中复制 Cookie 的完整内容。</small>
+        </label>
+        <div class="settingsSaveRow settingsWide">
+          <span id="configState" class="configState"></span>
+          <button id="saveConfigBtn" type="button">保存设置</button>
+        </div>
+        <div class="settingsDivider settingsWide">一键成片模板配置</div>
         <label class="field">
           <span>选择模板</span>
           <select id="templateEditorSelect"></select>
@@ -282,31 +370,34 @@
           <span>模板名称</span>
           <input id="templateName" placeholder="例如：直播强转化">
         </label>
-        <label class="field">
-          <span>视觉风格</span>
-          <select id="templateStyle">
-            <option value="drama">短剧增强</option>
-            <option value="ad">广告增强</option>
-            <option value="clean">干净原片</option>
-          </select>
-        </label>
-        <label class="inline packageToggle settingsWide">
-          <input id="templateDefaultBgm" type="checkbox" checked>
-          <span>默认启用 BGM</span>
-        </label>
-        <div class="templateActions settingsWide">
-          <button id="addTemplateBtn" type="button">新增模板</button>
-          <button id="updateTemplateBtn" type="button">保存模板</button>
-          <button id="deleteTemplateBtn" type="button">删除模板</button>
+        <div class="templateStyleRow">
+          <label class="field">
+            <span>视觉风格</span>
+            <select id="templateStyle">
+              <option value="drama">短剧增强</option>
+              <option value="ad">广告增强</option>
+              <option value="clean">干净原片</option>
+            </select>
+          </label>
+          <label class="inline packageToggle templateBgmToggle">
+            <input id="templateDefaultBgm" type="checkbox" checked>
+            <span>默认启用 BGM</span>
+          </label>
+          <div class="templateActions">
+            <button id="addTemplateBtn" type="button">新增模板</button>
+            <button id="updateTemplateBtn" type="button">保存模板</button>
+            <button id="deleteTemplateBtn" type="button">删除模板</button>
+          </div>
+        </div>
+        <div class="settingsDivider settingsWide">软件更新</div>
+        <div class="settingsUpdateRow settingsWide">
+          <span id="settingsVersion" class="settingsVersion">当前版本 v0.1.1</span>
+          <button id="checkUpdateBtn" type="button">检查更新</button>
         </div>
       </div>
-      <div class="settingsActions">
-        <button id="saveConfigBtn" type="button">保存设置</button>
-        <span id="configState" class="configState">未读取</span>
-      </div>
-      <div id="ffmpegDetected" class="detectedText"></div>
     </div>
   </div>
+  <script src="https://wwcdn.weixin.qq.com/node/wework/wwopen/js/wwLogin-1.2.7.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

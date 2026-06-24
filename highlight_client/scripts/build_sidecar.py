@@ -63,6 +63,10 @@ def main() -> None:
         "imageio_ffmpeg",
         "--collect-all",
         "yt_dlp",
+        "--collect-all",
+        "tos",
+        "--collect-all",
+        "volcengine",
         "server.py",
     ])
 

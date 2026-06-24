@@ -1,5 +1,19 @@
 const $ = (id) => document.getElementById(id);
 
+const appShell = $("appShell");
+const loginGate = $("loginGate");
+const wecomLoginFrame = $("wecomLoginFrame");
+const wecomLoginCode = $("wecomLoginCode");
+const wecomLoginBtn = $("wecomLoginBtn");
+const refreshWecomQrBtn = $("refreshWecomQrBtn");
+const openWecomQrBtn = $("openWecomQrBtn");
+const pasteWecomCallbackBtn = $("pasteWecomCallbackBtn");
+const loginState = $("loginState");
+const loginUserInfo = $("loginUserInfo");
+const logoutBtn = $("logoutBtn");
+const appVersion = $("appVersion");
+const settingsVersion = $("settingsVersion");
+const checkUpdateBtn = $("checkUpdateBtn");
 const videoPath = $("videoPath");
 const shareUrl = $("shareUrl");
 const info = $("info");
@@ -18,6 +32,7 @@ const storySummary = $("storySummary");
 const storyboardRefsList = $("storyboardRefsList");
 const storyboardRefCount = $("storyboardRefCount");
 const storyboardRefDescription = $("storyboardRefDescription");
+const storyVideoRefsList = $("storyVideoRefsList");
 const storyboardPanel = $("storyboardPanel");
 const thumbPanel = $("thumbPanel");
 const highlightPanel = $("highlightPanel");
@@ -32,21 +47,26 @@ const taskMessage = $("taskMessage");
 const taskPercent = $("taskPercent");
 const taskBar = $("taskBar");
 const cancelTaskBtn = $("cancelTaskBtn");
-const arkApiKey = $("arkApiKey");
-const apimartApiKey = $("apimartApiKey");
 const apimartImageSize = $("apimartImageSize");
 const apimartImageResolution = $("apimartImageResolution");
+const apimartImageQuality = $("apimartImageQuality");
 const seedanceDuration = $("seedanceDuration");
 const seedanceResolution = $("seedanceResolution");
+const seedanceSize = $("seedanceSize");
+const seedanceAudio = $("seedanceAudio");
+const applyStoryVideoDefaultsBtn = $("applyStoryVideoDefaultsBtn");
+const storyboardOutputDir = $("storyboardOutputDir");
 const ffmpegPath = $("ffmpegPath");
-const wecomWebhookUrl = $("wecomWebhookUrl");
-const usageLogName = $("usageLogName");
-const usageLogDept = $("usageLogDept");
 const downloadRetentionDays = $("downloadRetentionDays");
+const douyinCookie = $("douyinCookie");
 const configState = $("configState");
 const ffmpegDetected = $("ffmpegDetected");
 const settingsModal = $("settingsModal");
 const setupHint = $("setupHint");
+const mediaModal = $("mediaModal");
+const mediaModalTitle = $("mediaModalTitle");
+const mediaModalBody = $("mediaModalBody");
+const mediaModalDownload = $("mediaModalDownload");
 const aiRequirement = $("aiRequirement");
 const packageTemplate = $("packageTemplate");
 const packageBgm = $("packageBgm");
@@ -61,6 +81,7 @@ const templateDefaultBgm = $("templateDefaultBgm");
 const OUTPUT_DIR_KEY = "highlightClient.outputDir";
 
 outputDir.value = localStorage.getItem(OUTPUT_DIR_KEY) || "";
+storyboardOutputDir.value = localStorage.getItem(OUTPUT_DIR_KEY) || "";
 
 let clips = [];
 let currentTaskId = "";
@@ -72,6 +93,14 @@ let focusMarks = [];
 let storyboardShots = [];
 let storyboardSummary = "";
 let storyboardRefs = [];
+let storyVideoRefs = [];
+let historyItems = [];
+let historyVisibleCount = 10;
+let currentWecomQrUrl = "";
+let authPollTimer = 0;
+let sessionCheckTimer = 0;
+let wecomLoginInstance = null;
+let autoUpdateChecked = false;
 
 const ROLE_LABELS = {
   hook: "开头钩子",
@@ -132,6 +161,10 @@ function displayAction(action) {
   return action === "AI圈画重点" ? "AI识别重点" : (action || "任务");
 }
 
+function localImageSrc(path) {
+  return path ? `/local-image?path=${encodeURIComponent(path)}` : "";
+}
+
 function switchContentTab(tab) {
   const panels = {
     storyboard: storyboardPanel,
@@ -155,6 +188,35 @@ function switchContentTab(tab) {
   });
 }
 
+function openMediaModal({ type = "image", src = "", title = "预览", downloadName = "" } = {}) {
+  if (!src) return;
+  mediaModalTitle.textContent = title;
+  mediaModalBody.innerHTML = type === "video"
+    ? `<video src="${escapeHtml(src)}" controls autoplay></video>`
+    : `<img src="${escapeHtml(src)}" alt="${escapeHtml(title)}">`;
+  if (downloadName) {
+    mediaModalDownload.hidden = false;
+    mediaModalDownload.href = src;
+    mediaModalDownload.download = downloadName;
+  } else {
+    mediaModalDownload.hidden = true;
+    mediaModalDownload.removeAttribute("href");
+    mediaModalDownload.removeAttribute("download");
+  }
+  mediaModal.hidden = false;
+}
+
+function closeMediaModal() {
+  mediaModal.hidden = true;
+  mediaModalBody.innerHTML = "";
+}
+
+mediaModal.addEventListener("click", (event) => {
+  if (event.target === mediaModal) closeMediaModal();
+});
+
+$("closeMediaModalBtn").addEventListener("click", closeMediaModal);
+
 function renderStoryboard(summary = "") {
   storyboardSummary = summary || "";
   storySummary.textContent = summary || "";
@@ -165,34 +227,39 @@ function renderStoryboard(summary = "") {
   }
   storyboardList.className = "storyboardList";
   storyboardList.innerHTML = storyboardShots.map((shot, index) => {
-    const hasMedia = Boolean(shot.imageSrc || shot.videoSrc);
-    const mediaHtml = hasMedia ? `
-      <div class="storyMediaColumn">
-        <div class="storyAssets">
-          ${shot.imageSrc ? `
-            <figure class="storyAsset">
-              <img src="${escapeHtml(shot.imageSrc)}" alt="分镜图 ${index + 1}">
-              <figcaption>分镜图</figcaption>
-            </figure>
-          ` : ""}
-          ${shot.videoSrc ? `
-            <figure class="storyAsset">
-              <video src="${escapeHtml(shot.videoSrc)}" controls></video>
-              <figcaption>视频片段</figcaption>
-            </figure>
-          ` : ""}
-        </div>
-      </div>
-    ` : "";
-    return `
-    <article class="storyShot ${hasMedia ? "hasMedia" : ""}">
-      <div class="storyShotHead">
-        <strong>镜头 ${shot.shot || index + 1}</strong>
-        <span>${clock(shot.start)} - ${clock(shot.end)}</span>
-      </div>
-      <div class="storyBody">
-        ${mediaHtml}
-        <div class="storyScriptColumn">
+    const editing = Boolean(shot.editing);
+    const videoDuration = storyVideoDuration(shot, seedanceDuration.value);
+    const videoResolution = normalizeStoryVideoResolution(shot.videoResolution || seedanceResolution.value);
+    const videoSize = normalizeStoryVideoSize(shot.videoSize || seedanceSize.value);
+    const videoAudio = Boolean(shot.videoAudio ?? (seedanceAudio.checked || seedanceAudio.defaultChecked));
+    const hasImage = Boolean(shot.imageSrc);
+    const hasVideo = Boolean(shot.videoSrc);
+    const imageLoading = Boolean(shot.imageLoading);
+    const videoLoading = Boolean(shot.videoLoading);
+    const imageDownloadName = `storyboard_shot_${String(index + 1).padStart(2, "0")}.png`;
+    const videoDownloadName = `storyboard_shot_${String(index + 1).padStart(2, "0")}.mp4`;
+    const timeHtml = editing ? `
+        <span class="storyTimeEdit">
+          <input class="storyEdit storyTimeInput" data-field="start" type="number" min="0" step="0.1" value="${Number(shot.start || 0)}">
+          <em>-</em>
+          <input class="storyEdit storyTimeInput" data-field="end" type="number" min="0" step="0.1" value="${Number(shot.end || 0)}">
+        </span>
+    ` : `<span>${clock(shot.start)} - ${clock(shot.end)}</span>`;
+    const editButtons = editing ? `
+        <button class="storySaveEditBtn" type="button">保存</button>
+        <button class="storyCancelEditBtn" type="button">取消</button>
+    ` : `<button class="storyEditBtn" type="button">编辑</button>`;
+    const scriptHtml = editing ? `
+          <label class="storyField editable"><b>画面</b><textarea class="storyEdit" data-field="scene" rows="2">${escapeHtml(shot.scene || "根据画面内容推进")}</textarea></label>
+          <div class="storyMeta editableMeta">
+            <label><b>景别</b><input class="storyEdit" data-field="shotType" value="${escapeHtml(shot.shotType || "中景")}"></label>
+            <label><b>运镜</b><input class="storyEdit" data-field="camera" value="${escapeHtml(shot.camera || "稳定跟随")}"></label>
+          </div>
+          <label class="storyField editable"><b>内容</b><textarea class="storyEdit" data-field="action" rows="2">${escapeHtml(shot.action || "展示关键动作或卖点")}</textarea></label>
+          <label class="storyField editable"><b>台词</b><textarea class="storyEdit" data-field="dialogue" rows="2">${escapeHtml(shot.dialogue || "")}</textarea></label>
+          <label class="storyField editable"><b>字幕</b><textarea class="storyEdit" data-field="caption" rows="2">${escapeHtml(shot.caption || "")}</textarea></label>
+          <label class="storyField editable"><b>剪辑建议</b><textarea class="storyEdit" data-field="edit" rows="2">${escapeHtml(shot.edit || "自然衔接到下一镜")}</textarea></label>
+    ` : `
           <div class="storyField"><b>画面</b><span>${escapeHtml(shot.scene || "根据画面内容推进")}</span></div>
           <div class="storyMeta">
             <span><b>景别</b>${escapeHtml(shot.shotType || "中景")}</span>
@@ -202,36 +269,383 @@ function renderStoryboard(summary = "") {
           ${shot.dialogue ? `<div class="storyField"><b>台词</b><span>${escapeHtml(shot.dialogue)}</span></div>` : ""}
           ${shot.caption ? `<div class="storyField"><b>字幕</b><span>${escapeHtml(shot.caption)}</span></div>` : ""}
           <div class="storyField"><b>剪辑建议</b><span>${escapeHtml(shot.edit || "自然衔接到下一镜")}</span></div>
+    `;
+    const imageHtml = imageLoading ? `
+      <div class="storyImageColumn storyImageEmpty storyMediaLoading">
+        <div class="storyMediaTitle">分镜图</div>
+        <div class="storyLoadingBody">
+          <span class="spinner"></span>
+          <strong>正在生成分镜图...</strong>
         </div>
+      </div>
+    ` : hasImage ? `
+      <div class="storyImageColumn">
+        <figure class="storyAsset storyImageAsset">
+          <div class="storyMediaTitle">分镜图</div>
+          <button class="storyImageOpen" type="button" title="点击放大浏览">
+            <img src="${escapeHtml(shot.imageSrc)}" alt="分镜图 ${index + 1}">
+          </button>
+          <figcaption>
+            <button class="storyRegenerateImageBtn" type="button">重生成图</button>
+            <a href="${escapeHtml(shot.imageSrc)}" download="${escapeHtml(imageDownloadName)}">下载</a>
+          </figcaption>
+        </figure>
+      </div>
+    ` : `
+      <div class="storyImageColumn storyImageEmpty">
+        <div class="storyMediaTitle">分镜图</div>
+        <button class="storyGenerateImageBtn" type="button">生成本镜图</button>
+      </div>
+    `;
+    const videoHtml = videoLoading ? `
+      <aside class="storyVideoPreview storyVideoEmpty storyMediaLoading">
+        <div class="storyMediaTitle">分镜视频</div>
+        <div class="storyLoadingBody">
+          <span class="spinner"></span>
+          <strong>正在生成分镜视频...</strong>
+        </div>
+      </aside>
+    ` : hasVideo ? `
+      <aside class="storyVideoPreview">
+        <div class="storyMediaTitle">分镜视频</div>
+        <button class="storyVideoOpen" type="button" title="点击放大播放">
+          <video src="${escapeHtml(shot.videoSrc)}" muted preload="metadata"></video>
+        </button>
+        <div class="storyVideoActions">
+          <a href="${escapeHtml(shot.videoSrc)}" download="${escapeHtml(videoDownloadName)}">下载</a>
+        </div>
+      </aside>
+    ` : `
+      <aside class="storyVideoPreview storyVideoEmpty">
+        <div class="storyMediaTitle">分镜视频</div>
+        <span>视频生成后显示在这里</span>
+      </aside>
+    `;
+    return `
+    <article class="storyShot ${hasImage ? "hasImage" : ""} ${hasVideo ? "hasVideo" : ""} ${editing ? "editing" : ""}">
+      <div class="storyShotHead">
+        <strong>镜头 ${shot.shot || index + 1}</strong>
+        ${timeHtml}
+        <span class="storyEditActions">${editButtons}</span>
+      </div>
+      <div class="storyBody">
+        <div class="storyScriptColumn">
+          ${scriptHtml}
+          <div class="storyVideoControls" data-index="${index}">
+            <strong>视频片段</strong>
+            <label>
+              <span>时长</span>
+              <input class="storyVideoDuration" type="number" min="4" max="15" value="${videoDuration}">
+              <span>秒</span>
+            </label>
+            <label>
+              <span>清晰度</span>
+              <select class="storyVideoResolution">
+                <option value="480p" ${videoResolution === "480p" ? "selected" : ""}>480p</option>
+                <option value="720p" ${videoResolution === "720p" ? "selected" : ""}>720p</option>
+                <option value="1080p" ${videoResolution === "1080p" ? "selected" : ""}>1080p</option>
+              </select>
+            </label>
+            <label>
+              <span>比例</span>
+              <select class="storyVideoSize">
+                <option value="adaptive" ${videoSize === "adaptive" ? "selected" : ""}>自适应</option>
+                <option value="9:16" ${videoSize === "9:16" ? "selected" : ""}>9:16</option>
+                <option value="16:9" ${videoSize === "16:9" ? "selected" : ""}>16:9</option>
+                <option value="1:1" ${videoSize === "1:1" ? "selected" : ""}>1:1</option>
+                <option value="3:4" ${videoSize === "3:4" ? "selected" : ""}>3:4</option>
+                <option value="4:3" ${videoSize === "4:3" ? "selected" : ""}>4:3</option>
+                <option value="21:9" ${videoSize === "21:9" ? "selected" : ""}>21:9</option>
+              </select>
+            </label>
+            <label class="storyVideoAudio">
+              <input class="storyVideoAudioInput" type="checkbox" ${videoAudio ? "checked" : ""}>
+              <span>声音</span>
+            </label>
+            <button class="storyGenerateVideoBtn" type="button">生成本镜视频</button>
+          </div>
+        </div>
+        ${imageHtml}
+        ${videoHtml}
       </div>
     </article>
   `;
   }).join("");
+  bindStoryboardVideoControls();
+}
+
+function normalizeStoryVideoDuration(value) {
+  const number = Number(value || 5);
+  return Math.max(4, Math.min(15, Number.isFinite(number) ? Math.round(number) : 5));
+}
+
+function storyShotDuration(shot, fallback = 5) {
+  const start = Number(shot?.start);
+  const end = Number(shot?.end);
+  if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+    return normalizeStoryVideoDuration(end - start);
+  }
+  return normalizeStoryVideoDuration(shot?.videoDuration ?? fallback);
+}
+
+function storyVideoDuration(shot, fallback = 5) {
+  if (shot?.videoDurationManual) {
+    return normalizeStoryVideoDuration(shot.videoDuration ?? fallback);
+  }
+  return storyShotDuration(shot, fallback);
+}
+
+function normalizeStoryVideoResolution(value) {
+  return ["480p", "720p", "1080p"].includes(value) ? value : "720p";
+}
+
+function normalizeStoryVideoSize(value) {
+  return ["adaptive", "9:16", "16:9", "1:1", "3:4", "4:3", "21:9"].includes(value) ? value : "adaptive";
+}
+
+function normalizeImageQuality(value) {
+  return ["auto", "low", "medium", "high"].includes(value) ? value : "medium";
+}
+
+function cleanStoryboardShot(shot) {
+  const { editing, draft, imageLoading, videoLoading, ...rest } = shot || {};
+  return rest;
+}
+
+function storyboardPayload() {
+  return storyboardShots.map(cleanStoryboardShot);
+}
+
+function currentStoryVideoDefaults() {
+  return {
+    videoDuration: normalizeStoryVideoDuration(seedanceDuration.value),
+    videoResolution: normalizeStoryVideoResolution(seedanceResolution.value),
+    videoSize: normalizeStoryVideoSize(seedanceSize.value),
+    videoAudio: Boolean(seedanceAudio.checked),
+  };
+}
+
+function rememberStoryboardOutputDir() {
+  const value = storyboardOutputDir.value.trim();
+  if (value) {
+    localStorage.setItem(OUTPUT_DIR_KEY, value);
+    outputDir.value = value;
+  }
+}
+
+function bindStoryboardVideoControls() {
+  storyboardList.querySelectorAll(".storyEditBtn").forEach((button) => {
+    const row = button.closest(".storyShot")?.querySelector(".storyVideoControls");
+    const index = Number(row?.dataset.index);
+    button.addEventListener("click", () => {
+      if (!storyboardShots[index]) return;
+      storyboardShots[index].draft = { ...storyboardShots[index] };
+      storyboardShots[index].editing = true;
+      renderStoryboard(storyboardSummary);
+    });
+  });
+  storyboardList.querySelectorAll(".storySaveEditBtn").forEach((button) => {
+    const row = button.closest(".storyShot")?.querySelector(".storyVideoControls");
+    const index = Number(row?.dataset.index);
+    button.addEventListener("click", () => {
+      if (!storyboardShots[index]) return;
+      delete storyboardShots[index].draft;
+      storyboardShots[index].editing = false;
+      renderStoryboard(storyboardSummary);
+      storySummary.textContent = `镜头 ${index + 1} 修改已保存。`;
+    });
+  });
+  storyboardList.querySelectorAll(".storyCancelEditBtn").forEach((button) => {
+    const row = button.closest(".storyShot")?.querySelector(".storyVideoControls");
+    const index = Number(row?.dataset.index);
+    button.addEventListener("click", () => {
+      if (!storyboardShots[index]) return;
+      const draft = storyboardShots[index].draft;
+      storyboardShots[index] = draft ? { ...draft, editing: false } : { ...storyboardShots[index], editing: false };
+      delete storyboardShots[index].draft;
+      renderStoryboard(storyboardSummary);
+    });
+  });
+  storyboardList.querySelectorAll(".storyEdit").forEach((input) => {
+    const article = input.closest(".storyShot");
+    const row = article?.querySelector(".storyVideoControls");
+    const index = Number(row?.dataset.index);
+    input.addEventListener("input", () => {
+      if (!storyboardShots[index]) return;
+      if (["start", "end"].includes(input.dataset.field)) {
+        storyboardShots[index][input.dataset.field] = Math.max(0, Number(input.value || 0));
+      } else {
+        storyboardShots[index][input.dataset.field] = input.value;
+      }
+    });
+  });
+  storyboardList.querySelectorAll(".storyVideoControls").forEach((row) => {
+    const index = Number(row.dataset.index);
+    const durationInput = row.querySelector(".storyVideoDuration");
+    const resolutionSelect = row.querySelector(".storyVideoResolution");
+    const sizeSelect = row.querySelector(".storyVideoSize");
+    const audioInput = row.querySelector(".storyVideoAudioInput");
+    const generateButton = row.querySelector(".storyGenerateVideoBtn");
+    durationInput.addEventListener("input", () => {
+      storyboardShots[index].videoDuration = normalizeStoryVideoDuration(durationInput.value);
+      storyboardShots[index].videoDurationManual = true;
+    });
+    resolutionSelect.addEventListener("change", () => {
+      storyboardShots[index].videoResolution = normalizeStoryVideoResolution(resolutionSelect.value);
+    });
+    sizeSelect.addEventListener("change", () => {
+      storyboardShots[index].videoSize = normalizeStoryVideoSize(sizeSelect.value);
+    });
+    audioInput.addEventListener("change", () => {
+      storyboardShots[index].videoAudio = audioInput.checked;
+    });
+    generateButton.addEventListener("click", () => generateStoryboardVideo(index));
+  });
+  storyboardList.querySelectorAll(".storyGenerateImageBtn, .storyRegenerateImageBtn").forEach((button) => {
+    const article = button.closest(".storyShot");
+    const row = article?.querySelector(".storyVideoControls");
+    const index = Number(row?.dataset.index);
+    button.addEventListener("click", () => generateSingleStoryboardImage(index));
+  });
+  storyboardList.querySelectorAll(".storyImageOpen").forEach((button) => {
+    const article = button.closest(".storyShot");
+    const row = article?.querySelector(".storyVideoControls");
+    const index = Number(row?.dataset.index);
+    button.addEventListener("click", () => {
+      const shot = storyboardShots[index];
+      openMediaModal({
+        type: "image",
+        src: shot?.imageSrc,
+        title: `镜头 ${index + 1} 分镜图`,
+        downloadName: `storyboard_shot_${String(index + 1).padStart(2, "0")}.png`,
+      });
+    });
+  });
+  storyboardList.querySelectorAll(".storyVideoOpen").forEach((button) => {
+    const article = button.closest(".storyShot");
+    const row = article?.querySelector(".storyVideoControls");
+    const index = Number(row?.dataset.index);
+    button.addEventListener("click", () => {
+      const shot = storyboardShots[index];
+      openMediaModal({
+        type: "video",
+        src: shot?.videoSrc,
+        title: `镜头 ${index + 1} 分镜视频`,
+        downloadName: `storyboard_shot_${String(index + 1).padStart(2, "0")}.mp4`,
+      });
+    });
+  });
 }
 
 function renderStoryboardRefs() {
   storyboardRefCount.textContent = `${storyboardRefs.length}/16`;
   if (!storyboardRefs.length) {
     storyboardRefsList.className = "referenceList empty";
-    storyboardRefsList.textContent = "可上传人物、场景、商品或风格参考图，最多 16 张。";
+    storyboardRefsList.textContent = "可上传图片，也可让 AI 从分镜脚本中生成参考图，最多 16 张。";
     return;
   }
   storyboardRefsList.className = "referenceList";
   storyboardRefsList.innerHTML = "";
   storyboardRefs.forEach((ref, index) => {
+    const isAiRef = ref.source === "ai" || ref.prompt;
+    const editingPrompt = Boolean(ref.editingPrompt);
+    const previewSrc = ref.src || localImageSrc(ref.path || "");
+    const preview = previewSrc
+      ? `<button class="referencePreview" type="button" title="点击放大浏览"><img src="${escapeHtml(previewSrc)}" alt="参考图 ${index + 1}"></button>`
+      : `<span class="referencePreview referencePlaceholder"><b>${index + 1}</b></span>`;
+    const title = escapeHtml(ref.title || (isAiRef ? "AI参考图" : "用户上传"));
+    const path = escapeHtml(ref.path || "");
     const row = document.createElement("div");
-    row.className = "referenceItem";
+    row.className = `referenceItem ${isAiRef ? "aiReferenceItem" : "uploadedReferenceItem"} ${editingPrompt ? "editingPrompt" : ""}`;
     row.innerHTML = `
-      <span class="referenceIndex">${index + 1}</span>
-      <code>${escapeHtml(ref.path || ref)}</code>
-      <button type="button" class="removeReference" title="删除">×</button>
+      <div class="referenceCardHead">
+        <strong title="${title}">${title}</strong>
+      </div>
+      ${preview}
+      <div class="referenceCardActions">
+        ${isAiRef ? `<button type="button" class="editReferencePrompt" title="${editingPrompt ? "收起提示词" : "修改提示词"}">${editingPrompt ? "收起" : "修改"}</button>` : ""}
+        <button type="button" class="removeReference" title="删除">删除</button>
+      </div>
+      <div class="referenceText">
+        ${isAiRef && editingPrompt ? `<textarea class="referencePrompt" rows="3" placeholder="可调整提示词后重新生成">${escapeHtml(ref.prompt || "")}</textarea>` : ""}
+        ${!isAiRef ? `<small>用户上传</small><code>${path}</code>` : ""}
+      </div>
+      ${isAiRef && editingPrompt ? `<button type="button" class="regenerateReference">重新生成</button>` : ""}
     `;
+    const previewButton = row.querySelector(".referencePreview");
+    if (previewButton) {
+      previewButton.addEventListener("click", () => {
+        openMediaModal({
+          type: "image",
+          src: storyboardRefs[index].src || localImageSrc(storyboardRefs[index].path || ""),
+          title: storyboardRefs[index].title || `参考图 ${index + 1}`,
+          downloadName: `reference_${String(index + 1).padStart(2, "0")}.png`,
+        });
+      });
+    }
+    const editButton = row.querySelector(".editReferencePrompt");
+    if (editButton) {
+      editButton.addEventListener("click", () => {
+        storyboardRefs[index].editingPrompt = !storyboardRefs[index].editingPrompt;
+        renderStoryboardRefs();
+      });
+    }
+    const promptInput = row.querySelector(".referencePrompt");
+    if (promptInput) {
+      promptInput.addEventListener("input", () => {
+        storyboardRefs[index].prompt = promptInput.value;
+      });
+    }
+    const regenerateButton = row.querySelector(".regenerateReference");
+    if (regenerateButton) {
+      regenerateButton.addEventListener("click", () => regenerateStoryboardReference(index));
+    }
     row.querySelector(".removeReference").addEventListener("click", () => {
       storyboardRefs.splice(index, 1);
       renderStoryboardRefs();
     });
     storyboardRefsList.appendChild(row);
   });
+}
+
+function videoRefLabel(type) {
+  return { image: "参考图", video: "参考视频", audio: "参考声音" }[type] || "参考素材";
+}
+
+function videoRefLimit(type) {
+  return type === "image" ? 9 : 3;
+}
+
+function renderStoryVideoRefs() {
+  if (!storyVideoRefs.length) {
+    storyVideoRefsList.className = "videoReferenceList empty";
+    storyVideoRefsList.textContent = "可添加参考图、参考视频或参考声音，用于 Seedance2.0 生成分镜视频。";
+    return;
+  }
+  storyVideoRefsList.className = "videoReferenceList";
+  storyVideoRefsList.innerHTML = storyVideoRefs.map((ref, index) => `
+    <div class="videoReferenceItem">
+      <strong>${videoRefLabel(ref.type)}</strong>
+      <span>${escapeHtml(ref.title || ref.path || ref.url || "")}</span>
+      <button type="button" class="removeVideoReference" data-index="${index}" title="删除">×</button>
+    </div>
+  `).join("");
+  storyVideoRefsList.querySelectorAll(".removeVideoReference").forEach((button) => {
+    button.addEventListener("click", () => {
+      storyVideoRefs.splice(Number(button.dataset.index), 1);
+      renderStoryVideoRefs();
+    });
+  });
+}
+
+function addStoryVideoRef(ref) {
+  const count = storyVideoRefs.filter((item) => item.type === ref.type).length;
+  if (count >= videoRefLimit(ref.type)) {
+    storySummary.textContent = `${videoRefLabel(ref.type)}最多 ${videoRefLimit(ref.type)} 个。`;
+    return;
+  }
+  storyVideoRefs.push(ref);
+  renderStoryVideoRefs();
 }
 
 function renderClips() {
@@ -315,24 +729,26 @@ async function loadHistory() {
     const result = await fetch("/api/history");
     const data = await result.json();
     if (!result.ok) throw new Error(data.error || "历史记录读取失败");
-    renderHistory(data.items || []);
+    historyItems = (data.items || []).filter((item) => item.action !== "导出分镜脚本");
+    historyVisibleCount = 10;
+    renderHistory();
   } catch (error) {
     historyList.className = "historyList empty";
     historyList.textContent = error.message;
   }
 }
 
-function renderHistory(items) {
-  items = items.filter((item) => item.action !== "导出分镜脚本");
-  if (!items.length) {
+function renderHistory() {
+  if (!historyItems.length) {
     historyList.className = "historyList empty";
     historyList.textContent = "暂无历史记录。";
     return;
   }
+  const items = historyItems.slice(0, historyVisibleCount);
   historyList.className = "historyList";
   historyList.innerHTML = items.map((item) => `
     <button class="historyItem" type="button" data-id="${item.id}">
-      <strong>${displayAction(item.action)} · ${item.videoName || "未命名视频"}</strong>
+      <strong>${displayAction(item.action)}${item.videoName ? ` · ${item.videoName}` : ""}</strong>
       <span>${item.time || ""}</span>
       <small>${item.summary || item.duration || item.output || ""}</small>
     </button>
@@ -355,6 +771,18 @@ function renderHistory(items) {
         renderClips();
         switchContentTab("highlight");
       }
+      if (Array.isArray(item.references)) {
+        storyboardRefs = item.references.map((ref) => ({ ...ref, editingPrompt: false })).filter((ref) => ref.path || ref.src || ref.prompt);
+        renderStoryboardRefs();
+        if (!Array.isArray(item.storyboard) || !item.storyboard.length) {
+          storySummary.textContent = item.summary || "历史参考图已载入。";
+          switchContentTab("storyboard");
+        }
+      }
+      if (Array.isArray(item.videoReferences)) {
+        storyVideoRefs = item.videoReferences.filter((ref) => ref.path || ref.url);
+        renderStoryVideoRefs();
+      }
       if (Array.isArray(item.storyboard) && item.storyboard.length) {
         storyboardShots = item.storyboard;
         renderStoryboard(item.summary || "历史分镜脚本已载入。");
@@ -362,6 +790,24 @@ function renderHistory(items) {
       }
     });
   });
+  if (historyVisibleCount < historyItems.length) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "historyMore";
+    more.textContent = `向下滚动加载更多（${historyVisibleCount}/${historyItems.length}）`;
+    more.addEventListener("click", () => loadMoreHistory(false));
+    historyList.appendChild(more);
+  }
+}
+
+function loadMoreHistory(keepPosition = true) {
+  if (historyVisibleCount >= historyItems.length) return;
+  const previousTop = historyList.scrollTop;
+  historyVisibleCount = Math.min(historyVisibleCount + 10, historyItems.length);
+  renderHistory();
+  if (keepPosition) {
+    historyList.scrollTop = previousTop;
+  }
 }
 
 function renderTimedAssets(listEl, items, kind) {
@@ -461,6 +907,38 @@ function renderFocusMarks() {
   });
 }
 
+function resetVideoDerivedState() {
+  clips = [];
+  storyboardShots = [];
+  storyboardSummary = "";
+  storyboardRefs = [];
+  storyVideoRefs = [];
+  stickers = [];
+  bgms = [];
+  focusMarks = [];
+
+  renderStoryboard();
+  renderStoryboardRefs();
+  renderStoryVideoRefs();
+  renderClips();
+  renderTimedAssets(stickersList, stickers, "sticker");
+  renderTimedAssets(bgmList, bgms, "bgm");
+  renderFocusMarks();
+
+  thumbGrid.className = "grid empty";
+  thumbGrid.textContent = "点击“生成缩略图”后在这里选点。";
+  autoSummary.textContent = "";
+  exportResult.textContent = "";
+  focusRequirement.value = "";
+  packageBgm.checked = getSelectedTemplate().bgm !== false;
+
+  previewPane.hidden = true;
+  previewState.textContent = "";
+  clipPreview.pause();
+  clipPreview.removeAttribute("src");
+  clipPreview.load();
+}
+
 async function post(url, body) {
   const result = await fetch(url, {
     method: "POST",
@@ -472,41 +950,294 @@ async function post(url, body) {
   return json;
 }
 
+async function getJson(url) {
+  const result = await fetch(url);
+  const json = await result.json();
+  if (!result.ok) throw new Error(json.error || "请求失败");
+  return json;
+}
+
+function showLoginGate(message = "") {
+  if (sessionCheckTimer) {
+    clearInterval(sessionCheckTimer);
+    sessionCheckTimer = 0;
+  }
+  appShell.hidden = true;
+  loginGate.hidden = false;
+  loginState.textContent = message || "请使用企业微信扫码登录。";
+}
+
+function showAppShell(user = {}) {
+  if (authPollTimer) {
+    clearInterval(authPollTimer);
+    authPollTimer = 0;
+  }
+  if (sessionCheckTimer) clearInterval(sessionCheckTimer);
+  sessionCheckTimer = window.setInterval(async () => {
+    try {
+      const state = await getJson("/api/auth/status");
+      if (!state.loggedIn) {
+        showLoginGate("登录已超过 72 小时，请重新扫码登录。");
+        await loadWecomQr();
+      }
+    } catch {
+      // Ignore transient status check errors.
+    }
+  }, 60000);
+  loginGate.hidden = true;
+  appShell.hidden = false;
+  const name = user.username || "企业微信用户";
+  const dept = user.deptName || "未填写部门";
+  loginUserInfo.textContent = `${name} · ${dept}`;
+  configState.textContent = `已登录：${name}（${dept}）`;
+}
+
+async function enterAppAfterLogin(user = {}) {
+  showAppShell(user);
+  const config = await loadConfig();
+  if (configNeedsSetup(config)) {
+    openSettings();
+  }
+  loadHistory();
+  scheduleAutoUpdateCheck();
+}
+
+function tauriInvoke() {
+  return window.__TAURI__?.core?.invoke || window.__TAURI__?.tauri?.invoke || null;
+}
+
+async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
+  const invoke = tauriInvoke();
+  if (!invoke) {
+    if (!silent) configState.textContent = "自动更新仅在安装后的客户端中可用。";
+    return;
+  }
+  if (checkUpdateBtn) checkUpdateBtn.disabled = true;
+  if (!silent) configState.textContent = "正在检查更新...";
+  try {
+    const version = await invoke("check_for_update");
+    if (!version) {
+      if (!silent) configState.textContent = "当前已是最新版本";
+      return;
+    }
+    if (!autoInstall) {
+      const shouldInstall = window.confirm(`发现新版本 v${version}，是否现在更新？`);
+      if (!shouldInstall) {
+        configState.textContent = `发现新版本 v${version}，稍后可在设置中更新。`;
+        return;
+      }
+    }
+    configState.textContent = `正在下载并安装 v${version}...`;
+    const message = await invoke("install_update_if_available");
+    configState.textContent = message || "更新已安装，正在重启";
+  } catch (error) {
+    if (!silent) configState.textContent = `检查更新失败：${error?.message || error}`;
+  } finally {
+    if (checkUpdateBtn) checkUpdateBtn.disabled = false;
+  }
+}
+
+function scheduleAutoUpdateCheck() {
+  if (autoUpdateChecked) return;
+  autoUpdateChecked = true;
+  window.setTimeout(() => {
+    checkForAppUpdate({ silent: true, autoInstall: true });
+  }, 2500);
+}
+
+async function logoutWecom() {
+  logoutBtn.disabled = true;
+  try {
+    await post("/api/auth/logout", {});
+    loginUserInfo.textContent = "未登录";
+    configState.textContent = "已退出";
+    if (wecomLoginCode) wecomLoginCode.value = "";
+    showLoginGate("已退出，请重新扫码登录。");
+    await loadWecomQr();
+  } catch (error) {
+    configState.textContent = error.message;
+  } finally {
+    logoutBtn.disabled = false;
+  }
+}
+
+function startAuthPolling() {
+  if (authPollTimer) clearInterval(authPollTimer);
+  let attempts = 0;
+  authPollTimer = window.setInterval(async () => {
+    attempts += 1;
+    try {
+      const state = await getJson("/api/auth/status");
+      if (state.loggedIn) {
+        await enterAppAfterLogin(state.user || {});
+        return;
+      }
+    } catch {
+      // Ignore transient polling errors.
+    }
+    if (attempts === 12) {
+      loginState.textContent = "暂未收到登录结果，请确认手机端已点击确认；如二维码过期，可点击刷新。";
+    }
+  }, 2000);
+}
+
+async function loadWecomQr() {
+  try {
+    const data = await getJson("/api/auth/qr");
+    currentWecomQrUrl = data.url;
+    if (wecomLoginInstance?.destroyed) {
+      try {
+        wecomLoginInstance.destroyed();
+      } catch {
+        // The official widget cleans up best-effort.
+      }
+    }
+    wecomLoginFrame.innerHTML = "";
+    if (window.WwLogin) {
+      wecomLoginInstance = new window.WwLogin({
+        id: "wecomLoginFrame",
+        appid: data.appid,
+        agentid: data.agentid,
+        redirect_uri: encodeURIComponent(data.redirectUri),
+        state: data.state || "video",
+        lang: "zh",
+      });
+    } else {
+      wecomLoginFrame.innerHTML = `<iframe title="企业微信扫码登录" src="${escapeHtml(data.url)}"></iframe>`;
+    }
+    loginState.textContent = "暂未收到登录结果，请确认手机端已点击确认；如二维码过期，可点击刷新。";
+    startAuthPolling();
+  } catch (error) {
+    loginState.textContent = error.message;
+  }
+}
+
+async function pasteWecomCallback() {
+  if (!navigator.clipboard?.readText) {
+    loginState.textContent = "当前环境无法直接读取剪贴板，请手动粘贴跳转链接或 code。";
+    return;
+  }
+  try {
+    const text = (await navigator.clipboard.readText()).trim();
+    if (!text) {
+      loginState.textContent = "剪贴板为空，请复制扫码成功后的跳转链接或 code。";
+      return;
+    }
+    wecomLoginCode.value = text;
+    loginState.textContent = "已粘贴，请点击完成登录。";
+  } catch {
+    loginState.textContent = "没有剪贴板读取权限，请手动粘贴跳转链接或 code。";
+  }
+}
+
+function extractCodeFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    return url.searchParams.get("code") || "";
+  } catch {
+    const match = text.match(/(?:code=)?([A-Za-z0-9_-]{8,})/);
+    return match ? match[1] : text;
+  }
+}
+
+function isTrustedWecomOrigin(origin) {
+  try {
+    const hostname = new URL(origin).hostname;
+    return hostname === "work.weixin.qq.com" || hostname.endsWith(".work.weixin.qq.com") || hostname === "tencent.com" || hostname.endsWith(".tencent.com");
+  } catch {
+    return false;
+  }
+}
+
+async function handleWecomLoginMessage(event) {
+  if (!isTrustedWecomOrigin(event.origin) || typeof event.data !== "string") return;
+  const code = extractCodeFromText(event.data);
+  if (!code) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (wecomLoginCode) wecomLoginCode.value = event.data;
+  await submitWecomLogin(event.data);
+}
+
+async function submitWecomLogin(value) {
+  const code = extractCodeFromText(value);
+  if (!code) {
+    loginState.textContent = "请先粘贴扫码后的跳转链接或 code。";
+    return false;
+  }
+  if (wecomLoginBtn) wecomLoginBtn.disabled = true;
+  loginState.textContent = "正在校验企业微信登录...";
+  try {
+    const state = await post("/api/auth/login", { code });
+    await enterAppAfterLogin(state.user || {});
+    return true;
+  } catch (error) {
+    loginState.textContent = error.message;
+    return false;
+  } finally {
+    if (wecomLoginBtn) wecomLoginBtn.disabled = false;
+  }
+}
+
+async function initAuth() {
+  const callbackCode = extractCodeFromText(window.location.href);
+  if (callbackCode) {
+    showLoginGate("检测到企业微信回调 code，正在自动登录...");
+    const loggedIn = await submitWecomLogin(callbackCode);
+    if (loggedIn) {
+      window.history.replaceState({}, document.title, "/");
+      return true;
+    }
+  }
+  try {
+    const state = await getJson("/api/auth/status");
+    if (state.loggedIn) {
+      await enterAppAfterLogin(state.user || {});
+      return true;
+    }
+  } catch {
+    // Fall through to login gate.
+  }
+  showLoginGate("正在准备企业微信二维码...");
+  await loadWecomQr();
+  return false;
+}
+
 async function loadConfig() {
   try {
     const result = await fetch("/api/config");
     const data = await result.json();
     if (!result.ok) throw new Error(data.error || "设置读取失败");
+    const versionText = `版本 v${data.version || "0.1.1"}`;
+    if (appVersion) appVersion.textContent = versionText;
+    if (settingsVersion) settingsVersion.textContent = `当前${versionText}`;
     ffmpegPath.value = data.ffmpegPath || "";
-    wecomWebhookUrl.value = data.wecomWebhookUrl || "";
-    usageLogName.value = data.usageLogName || "";
-    usageLogDept.value = data.usageLogDept || "";
     downloadRetentionDays.value = String(data.downloadRetentionDays ?? 30);
+    if (douyinCookie) {
+      douyinCookie.value = "";
+      douyinCookie.placeholder = data.hasDouyinCookie ? `${data.douyinCookieMasked || "已配置抖音 Cookie"}；如需更新请重新粘贴` : "抖音下载失败时粘贴浏览器请求里的 Cookie";
+    }
     apimartImageSize.value = data.apimartImageSize || "9:16";
     apimartImageResolution.value = data.apimartImageResolution || "1k";
-    seedanceDuration.value = String(data.seedanceDuration ?? 5);
-    seedanceResolution.value = data.seedanceResolution || "720p";
+    apimartImageQuality.value = normalizeImageQuality(data.apimartImageQuality || "medium");
+    seedanceDuration.value = String(normalizeStoryVideoDuration(data.seedanceDuration ?? 5));
+    seedanceResolution.value = normalizeStoryVideoResolution(data.seedanceResolution || "720p");
+    seedanceSize.value = normalizeStoryVideoSize(data.seedanceSize || "adaptive");
+    seedanceAudio.checked = data.seedanceAudio !== false;
     packageTemplates = normalizeTemplates(data.packageTemplates || FALLBACK_TEMPLATES);
     selectedPackageTemplate = data.packageTemplate || "none";
     renderTemplateOptions(selectedPackageTemplate);
     renderTemplateEditor(packageTemplates[selectedPackageTemplate] ? selectedPackageTemplate : templateEditorSelect.value);
     packageBgm.checked = getSelectedTemplate().bgm !== false;
-    arkApiKey.placeholder = data.hasArkApiKey ? `已保存：${data.arkApiKeyMasked}` : "仅保存在本机配置文件中";
-    apimartApiKey.placeholder = data.hasApimartApiKey ? `已保存：${data.apimartApiKeyMasked}` : "仅保存在本机配置文件中";
-    const keyStates = [
-      data.hasArkApiKey ? "方舟 Key 已配置" : "方舟 Key 未配置",
-      data.hasApimartApiKey ? "APIMart Key 已配置" : "APIMart Key 未配置",
-    ];
-    configState.textContent = keyStates.join("，");
+    configState.textContent = "";
     ffmpegDetected.textContent = data.detectedFfmpegPath ? `检测到 ffmpeg：${data.detectedFfmpegPath}` : "未自动检测到 ffmpeg";
     const missing = [];
-    if (!data.usageLogName) missing.push("姓名");
-    if (!data.usageLogDept) missing.push("部门");
-    if (!data.hasArkApiKey) missing.push("火山方舟 API Key");
     if (!data.detectedFfmpegPath && !data.ffmpegPath) missing.push("ffmpeg 路径");
     if (missing.length) {
       setupHint.hidden = false;
-      setupHint.textContent = `首次使用建议先设置：${missing.join("、")}。姓名和部门会用于使用日志，普通本地识别需要 ffmpeg，AI识别高光需要 API Key。`;
+      setupHint.textContent = `首次使用建议先设置：${missing.join("、")}。普通本地识别和导出需要 ffmpeg。`;
     } else {
       setupHint.hidden = true;
       setupHint.textContent = "";
@@ -580,7 +1311,7 @@ function readTemplateEditor() {
 }
 
 function configNeedsSetup(data) {
-  return data && (!data.usageLogName || !data.usageLogDept || !data.hasArkApiKey || (!data.detectedFfmpegPath && !data.ffmpegPath));
+  return data && (!data.detectedFfmpegPath && !data.ffmpegPath);
 }
 
 function openSettings() {
@@ -608,6 +1339,10 @@ $("pickFfmpegBtn").addEventListener("click", async () => {
   }
 });
 
+checkUpdateBtn?.addEventListener("click", () => {
+  checkForAppUpdate({ silent: false });
+});
+
 $("saveConfigBtn").addEventListener("click", async () => {
   configState.textContent = "正在保存设置...";
   try {
@@ -620,22 +1355,18 @@ $("saveConfigBtn").addEventListener("click", async () => {
     }
     const payload = {
       ffmpegPath: ffmpegPath.value.trim(),
-      wecomWebhookUrl: wecomWebhookUrl.value.trim(),
-      usageLogName: usageLogName.value.trim(),
-      usageLogDept: usageLogDept.value.trim(),
       downloadRetentionDays: Number(downloadRetentionDays.value || 30),
-      apimartImageSize: apimartImageSize.value,
-      apimartImageResolution: apimartImageResolution.value,
-      seedanceDuration: Number(seedanceDuration.value || 5),
-      seedanceResolution: seedanceResolution.value,
+      seedanceDuration: normalizeStoryVideoDuration(seedanceDuration.value),
+      seedanceResolution: normalizeStoryVideoResolution(seedanceResolution.value),
+      seedanceSize: normalizeStoryVideoSize(seedanceSize.value),
+      seedanceAudio: Boolean(seedanceAudio.checked),
       packageTemplate: packageTemplate.value,
       packageTemplates,
     };
-    if (arkApiKey.value.trim()) payload.arkApiKey = arkApiKey.value.trim();
-    if (apimartApiKey.value.trim()) payload.apimartApiKey = apimartApiKey.value.trim();
+    if (douyinCookie?.value.trim()) {
+      payload.douyinCookie = douyinCookie.value.trim();
+    }
     await post("/api/config", payload);
-    arkApiKey.value = "";
-    apimartApiKey.value = "";
     await loadConfig();
     configState.textContent = "设置已保存";
   } catch (error) {
@@ -721,7 +1452,11 @@ $("addStoryboardRefBtn").addEventListener("click", () => {
   storySummary.textContent = "请选择分镜参考图...";
   post("/api/pick-reference-image", {}).then((data) => {
     if (data.path) {
-      storyboardRefs.push({ path: data.path });
+      storyboardRefs.push({
+        path: data.path,
+        src: data.src || localImageSrc(data.path),
+        title: data.path.split(/[\\/]/).pop() || "用户上传",
+      });
       renderStoryboardRefs();
       storySummary.textContent = "已添加参考图。可在下方说明每张图是什么。";
     }
@@ -730,10 +1465,130 @@ $("addStoryboardRefBtn").addEventListener("click", () => {
   });
 });
 
+$("generateStoryboardRefsBtn").addEventListener("click", async () => {
+  switchContentTab("storyboard");
+  if (!storyboardShots.length) {
+    storySummary.textContent = "请先生成分镜脚本，再生成 AI 参考图。";
+    return;
+  }
+  if (storyboardRefs.length >= 16) {
+    storySummary.textContent = "参考图最多 16 张。";
+    return;
+  }
+  storySummary.textContent = "正在调用 GPT-Image-2 生成参考图...";
+  try {
+    await runTask("/api/storyboard-reference-images", {
+      shots: storyboardPayload(),
+      existingCount: storyboardRefs.length,
+      existingReferences: storyboardRefs,
+      size: apimartImageSize.value || "9:16",
+      resolution: apimartImageResolution.value || "1k",
+      quality: normalizeImageQuality(apimartImageQuality.value),
+    }, (data) => {
+      const refs = (data.references || []).slice(0, Math.max(0, 16 - storyboardRefs.length));
+      storyboardRefs = storyboardRefs.concat(refs);
+      renderStoryboardRefs();
+      storySummary.textContent = data.summary || `已生成 ${refs.length} 张 AI 参考图。`;
+    });
+  } catch (error) {
+    storySummary.textContent = error.message;
+  }
+});
+
+async function regenerateStoryboardReference(index) {
+  const ref = storyboardRefs[index];
+  if (!ref) return;
+  const prompt = String(ref.prompt || "").trim();
+  if (!prompt) {
+    storySummary.textContent = "请先填写参考图提示词。";
+    return;
+  }
+  storySummary.textContent = `正在重新生成参考图 ${index + 1}...`;
+  try {
+    await runTask("/api/storyboard-reference-image", {
+      prompt,
+      title: ref.title || `参考图 ${index + 1}`,
+      index,
+      existingReferences: storyboardRefs,
+      size: apimartImageSize.value || "9:16",
+      resolution: apimartImageResolution.value || "1k",
+      quality: normalizeImageQuality(apimartImageQuality.value),
+    }, (data) => {
+      if (data.reference) {
+        storyboardRefs[index] = data.reference;
+        renderStoryboardRefs();
+      }
+      storySummary.textContent = data.summary || `参考图 ${index + 1} 已重新生成。`;
+    });
+  } catch (error) {
+    storySummary.textContent = error.message;
+  }
+}
+
 $("clearStoryboardRefsBtn").addEventListener("click", () => {
   storyboardRefs = [];
   renderStoryboardRefs();
   storySummary.textContent = "已清空参考图。";
+});
+
+$("useGeneratedVideosBtn").addEventListener("click", () => {
+  const generated = storyboardShots
+    .filter((shot) => shot.videoUrl || shot.videoSrc)
+    .slice(0, 3)
+    .map((shot, index) => ({
+      type: "video",
+      url: shot.videoStorageUrl || shot.videoUrl || "",
+      storageUrl: shot.videoStorageUrl || "",
+      storagePath: shot.videoStoragePath || "",
+      src: shot.videoSrc || "",
+      path: shot.videoPath || "",
+      title: `已生成视频 ${shot.shot || index + 1}`,
+    }));
+  if (!generated.length) {
+    storySummary.textContent = "当前还没有已生成的分镜视频。";
+    return;
+  }
+  generated.forEach(addStoryVideoRef);
+  storySummary.textContent = `已添加 ${generated.length} 个已生成视频作为参考。`;
+});
+
+$("addStoryVideoRefImageBtn").addEventListener("click", () => {
+  post("/api/pick-reference-image", {}).then((data) => {
+    if (data.path) {
+      addStoryVideoRef({ type: "image", path: data.path, title: data.path.split(/[\\/]/).pop() });
+      storySummary.textContent = "已添加视频参考图。";
+    }
+  }).catch((error) => {
+    storySummary.textContent = error.message;
+  });
+});
+
+$("addStoryVideoRefVideoBtn").addEventListener("click", () => {
+  post("/api/pick-reference-video", {}).then((data) => {
+    if (data.path) {
+      addStoryVideoRef({ type: "video", path: data.path, title: data.path.split(/[\\/]/).pop() });
+      storySummary.textContent = "已添加参考视频。";
+    }
+  }).catch((error) => {
+    storySummary.textContent = error.message;
+  });
+});
+
+$("addStoryVideoRefAudioBtn").addEventListener("click", () => {
+  post("/api/pick-reference-audio", {}).then((data) => {
+    if (data.path) {
+      addStoryVideoRef({ type: "audio", path: data.path, title: data.path.split(/[\\/]/).pop() });
+      storySummary.textContent = "已添加参考声音。";
+    }
+  }).catch((error) => {
+    storySummary.textContent = error.message;
+  });
+});
+
+$("clearStoryVideoRefsBtn").addEventListener("click", () => {
+  storyVideoRefs = [];
+  renderStoryVideoRefs();
+  storySummary.textContent = "已清空视频参考素材。";
 });
 
 function setProgress(progress, message) {
@@ -824,6 +1679,7 @@ $("pickVideoBtn").addEventListener("click", async () => {
   info.textContent = "请选择视频文件...";
   try {
     const data = await post("/api/pick-file", {});
+    resetVideoDerivedState();
     videoPath.value = data.path;
     await probeVideo();
   } catch (error) {
@@ -861,6 +1717,7 @@ $("downloadShareBtn").addEventListener("click", async () => {
   info.textContent = "正在准备下载分享视频...";
   try {
     await runTask("/api/download-link", { url: value }, async (data) => {
+      resetVideoDerivedState();
       videoPath.value = data.path;
       info.textContent = `下载完成：${data.title || data.path}`;
       await probeVideo();
@@ -876,6 +1733,7 @@ $("pickDirBtn").addEventListener("click", async () => {
   try {
     const data = await post("/api/pick-dir", {});
     outputDir.value = data.path;
+    storyboardOutputDir.value = data.path;
     localStorage.setItem(OUTPUT_DIR_KEY, data.path);
     exportResult.textContent = `导出目录：${data.path}`;
   } catch (error) {
@@ -885,7 +1743,25 @@ $("pickDirBtn").addEventListener("click", async () => {
 
 outputDir.addEventListener("change", () => {
   const value = outputDir.value.trim();
-  if (value) localStorage.setItem(OUTPUT_DIR_KEY, value);
+  if (value) {
+    localStorage.setItem(OUTPUT_DIR_KEY, value);
+    storyboardOutputDir.value = value;
+  }
+});
+
+historyList.addEventListener("scroll", () => {
+  if (historyList.classList.contains("empty")) return;
+  if (historyVisibleCount >= historyItems.length) return;
+  const nearBottom = historyList.scrollTop + historyList.clientHeight >= historyList.scrollHeight - 80;
+  if (nearBottom) loadMoreHistory();
+});
+
+historyList.addEventListener("wheel", (event) => {
+  if (event.deltaY <= 0) return;
+  if (historyList.classList.contains("empty")) return;
+  if (historyVisibleCount >= historyItems.length) return;
+  const nearBottom = historyList.scrollTop + historyList.clientHeight >= historyList.scrollHeight - 120;
+  if (nearBottom) loadMoreHistory();
 });
 
 $("thumbBtn").addEventListener("click", async () => {
@@ -1097,41 +1973,190 @@ $("storyboardImagesBtn").addEventListener("click", async () => {
     return;
   }
   storySummary.textContent = "正在调用 GPT-Image-2 生成分镜图...";
+  storyboardShots = storyboardShots.map((shot) => ({ ...shot, imageLoading: true }));
+  renderStoryboard(storyboardSummary);
   try {
     await runTask("/api/storyboard-images", {
-      shots: storyboardShots,
+      shots: storyboardPayload(),
+      allShots: storyboardPayload(),
       references: storyboardRefs.filter((ref) => ref.path && ref.path.trim()).slice(0, 16),
       referenceDescription: storyboardRefDescription.value.trim(),
       size: apimartImageSize.value || "9:16",
       resolution: apimartImageResolution.value || "1k",
+      quality: normalizeImageQuality(apimartImageQuality.value),
     }, (data) => {
       storyboardShots = data.shots || storyboardShots;
       renderStoryboard(data.summary || `已生成 ${storyboardShots.length} 张分镜图。`);
       loadHistory();
     });
   } catch (error) {
+    storyboardShots = storyboardShots.map((shot) => ({ ...shot, imageLoading: false }));
+    renderStoryboard(storyboardSummary);
     storySummary.textContent = error.message;
   }
 });
 
-$("storyboardVideosBtn").addEventListener("click", async () => {
+async function generateSingleStoryboardImage(index) {
   switchContentTab("storyboard");
-  if (!storyboardShots.length) {
-    storySummary.textContent = "请先生成分镜脚本，再生成视频片段。";
+  const shot = storyboardShots[index];
+  if (!shot) {
+    storySummary.textContent = "请选择要生成分镜图的镜头。";
     return;
   }
-  storySummary.textContent = "正在调用 Seedance2.0 生成视频片段...";
+  storySummary.textContent = `正在调用 GPT-Image-2 生成镜头 ${index + 1} 的分镜图...`;
+  storyboardShots[index] = { ...storyboardShots[index], imageLoading: true };
+  renderStoryboard(storyboardSummary);
   try {
-    await runTask("/api/storyboard-videos", {
-      shots: storyboardShots,
-      duration: Number(seedanceDuration.value || 5),
-      resolution: seedanceResolution.value || "720p",
+    await runTask("/api/storyboard-images", {
+      shots: [cleanStoryboardShot(shot)],
+      allShots: storyboardPayload(),
+      index,
+      references: storyboardRefs.filter((ref) => ref.path && ref.path.trim()).slice(0, 16),
+      referenceDescription: storyboardRefDescription.value.trim(),
       size: apimartImageSize.value || "9:16",
+      resolution: apimartImageResolution.value || "1k",
+      quality: normalizeImageQuality(apimartImageQuality.value),
     }, (data) => {
-      storyboardShots = data.shots || storyboardShots;
-      renderStoryboard(data.summary || `已生成 ${storyboardShots.length} 个视频片段。`);
+      const nextShot = (data.shots || [])[0];
+      if (nextShot) {
+        storyboardShots[index] = {
+          ...storyboardShots[index],
+          imageLoading: false,
+          imageUrl: nextShot.imageUrl,
+          imageTaskId: nextShot.imageTaskId,
+          imagePath: nextShot.imagePath,
+          imageSrc: nextShot.imageSrc,
+        };
+      } else if (storyboardShots[index]) {
+        storyboardShots[index] = { ...storyboardShots[index], imageLoading: false };
+      }
+      renderStoryboard(`镜头 ${index + 1} 分镜图已生成。`);
       loadHistory();
     });
+  } catch (error) {
+    if (storyboardShots[index]) {
+      storyboardShots[index] = { ...storyboardShots[index], imageLoading: false };
+      renderStoryboard(storyboardSummary);
+    }
+    storySummary.textContent = error.message;
+  }
+}
+
+async function generateStoryboardVideo(index) {
+  switchContentTab("storyboard");
+  const shot = storyboardShots[index];
+  if (!shot) {
+    storySummary.textContent = "请选择要生成的视频镜头。";
+    return;
+  }
+  const defaults = currentStoryVideoDefaults();
+  const payloadShot = {
+    ...shot,
+    videoDuration: storyVideoDuration(shot, defaults.videoDuration),
+    videoResolution: normalizeStoryVideoResolution(shot.videoResolution || defaults.videoResolution),
+    videoSize: normalizeStoryVideoSize(shot.videoSize || defaults.videoSize),
+    videoAudio: Boolean(shot.videoAudio ?? defaults.videoAudio),
+  };
+  storyboardShots[index] = { ...payloadShot, videoLoading: true };
+  renderStoryboard(storyboardSummary);
+  storySummary.textContent = `正在生成镜头 ${index + 1} 的视频片段...`;
+  try {
+    await runTask("/api/storyboard-video", {
+      shot: cleanStoryboardShot(payloadShot),
+      allShots: storyboardPayload(),
+      index,
+      references: storyVideoRefs,
+      ...defaults,
+      videoDuration: payloadShot.videoDuration,
+      videoResolution: payloadShot.videoResolution,
+      videoSize: payloadShot.videoSize,
+      videoAudio: payloadShot.videoAudio,
+    }, (data) => {
+      const nextShot = data.shot || (data.shots || [])[0];
+      if (nextShot) {
+        storyboardShots[index] = { ...nextShot, videoLoading: false };
+      } else if (storyboardShots[index]) {
+        storyboardShots[index] = { ...storyboardShots[index], videoLoading: false };
+      }
+      renderStoryboard(data.summary || `镜头 ${index + 1} 视频片段已生成。`);
+      loadHistory();
+    });
+  } catch (error) {
+    if (storyboardShots[index]) {
+      storyboardShots[index] = { ...storyboardShots[index], videoLoading: false };
+      renderStoryboard(storyboardSummary);
+    }
+    storySummary.textContent = error.message;
+  }
+}
+
+applyStoryVideoDefaultsBtn.addEventListener("click", () => {
+  const defaults = currentStoryVideoDefaults();
+  storyboardShots = storyboardShots.map((shot) => ({
+    ...shot,
+    videoResolution: defaults.videoResolution,
+    videoSize: defaults.videoSize,
+    videoAudio: defaults.videoAudio,
+  }));
+  renderStoryboard(storyboardSummary || (storyboardShots.length ? "已应用视频生成参数。" : ""));
+});
+
+$("saveStoryboardEditsBtn").addEventListener("click", () => {
+  switchContentTab("storyboard");
+  const summary = storyboardSummary;
+  storyboardShots = storyboardShots.map((shot) => {
+    const clean = cleanStoryboardShot(shot);
+    clean.editing = false;
+    return clean;
+  });
+  renderStoryboard(summary);
+  storySummary.textContent = storyboardShots.length ? "分镜修改已保存到当前任务，导出分镜会使用修改后的内容。" : "暂无可保存的分镜。";
+});
+
+$("pickStoryboardDirBtn").addEventListener("click", async () => {
+  switchContentTab("storyboard");
+  storySummary.textContent = "请选择分镜视频导出目录...";
+  try {
+    const data = await post("/api/pick-dir", {});
+    storyboardOutputDir.value = data.path;
+    rememberStoryboardOutputDir();
+    storySummary.textContent = `导出目录：${data.path}`;
+  } catch (error) {
+    storySummary.textContent = error.message;
+  }
+});
+
+storyboardOutputDir.addEventListener("change", rememberStoryboardOutputDir);
+
+$("mergeStoryboardVideosBtn").addEventListener("click", async () => {
+  switchContentTab("storyboard");
+  storySummary.textContent = "正在合并分镜视频...";
+  try {
+    const data = await post("/api/storyboard-merge-videos", {
+      path: videoPath.value,
+      outputDir: storyboardOutputDir.value,
+      shots: storyboardPayload(),
+    });
+    rememberStoryboardOutputDir();
+    storySummary.innerHTML = `合并完成：<code>${escapeHtml(data.path)}</code>`;
+    loadHistory();
+  } catch (error) {
+    storySummary.textContent = error.message;
+  }
+});
+
+$("exportStoryboardVideosBtn").addEventListener("click", async () => {
+  switchContentTab("storyboard");
+  storySummary.textContent = "正在导出分镜视频...";
+  try {
+    const data = await post("/api/storyboard-export-videos", {
+      path: videoPath.value,
+      outputDir: storyboardOutputDir.value,
+      shots: storyboardPayload(),
+    });
+    rememberStoryboardOutputDir();
+    storySummary.innerHTML = `已导出 ${data.count} 个分镜视频：<code>${escapeHtml(data.outputDir)}</code>`;
+    loadHistory();
   } catch (error) {
     storySummary.textContent = error.message;
   }
@@ -1145,7 +2170,7 @@ $("exportStoryboardBtn").addEventListener("click", async () => {
     const data = await post("/api/export-storyboard", {
       path: videoPath.value,
       summary: summaryToExport,
-      shots: storyboardShots,
+      shots: storyboardPayload(),
     });
     rememberOutputDir();
     storySummary.innerHTML = `分镜脚本已导出：<code>${escapeHtml(data.path)}</code>`;
@@ -1186,15 +2211,34 @@ renderTimedAssets(bgmList, bgms, "bgm");
 renderFocusMarks();
 renderStoryboard();
 renderStoryboardRefs();
+renderStoryVideoRefs();
 storyboardTabBtn.addEventListener("click", () => switchContentTab("storyboard"));
 thumbTabBtn.addEventListener("click", () => switchContentTab("thumb"));
 highlightTabBtn.addEventListener("click", () => switchContentTab("highlight"));
 packageTabBtn.addEventListener("click", () => switchContentTab("package"));
 $("refreshHistoryBtn").addEventListener("click", loadHistory);
-(async function init() {
-  const config = await loadConfig();
-  if (configNeedsSetup(config)) {
-    openSettings();
+refreshWecomQrBtn?.addEventListener("click", loadWecomQr);
+openWecomQrBtn?.addEventListener("click", () => {
+  if (!currentWecomQrUrl) {
+    loadWecomQr();
+    return;
   }
-  loadHistory();
+  window.open(currentWecomQrUrl, "_blank", "noopener,noreferrer");
+  loginState.textContent = "已打开外部扫码页。手机确认后，请复制扫码页最终跳转地址栏里的链接或 code，回到这里粘贴并完成登录。";
+});
+pasteWecomCallbackBtn?.addEventListener("click", pasteWecomCallback);
+logoutBtn.addEventListener("click", logoutWecom);
+wecomLoginBtn?.addEventListener("click", async () => {
+  await submitWecomLogin(wecomLoginCode.value);
+});
+wecomLoginCode?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    wecomLoginBtn.click();
+  }
+});
+window.addEventListener("message", handleWecomLoginMessage, true);
+(async function init() {
+  const loggedIn = await initAuth();
+  if (!loggedIn) return;
 })();

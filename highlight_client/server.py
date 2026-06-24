@@ -5,6 +5,10 @@ import json
 import os
 import re
 import base64
+import hashlib
+import hmac
+import mimetypes
+import socket
 import statistics
 import shutil
 import ssl
@@ -13,13 +17,14 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from PIL import Image, ImageChops, ImageStat
 
 try:
@@ -36,6 +41,25 @@ DEV_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", DEV_ROOT))
 
 
+def app_version() -> str:
+    if os.environ.get("APP_VERSION"):
+        return os.environ["APP_VERSION"].strip()
+    for candidate in (
+        DEV_ROOT / "src-tauri" / "tauri.conf.json",
+        DEV_ROOT / "package.json",
+        RESOURCE_ROOT / "src-tauri" / "tauri.conf.json",
+        RESOURCE_ROOT / "package.json",
+    ):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+            version = str(data.get("version") or "").strip()
+            if version:
+                return version
+        except Exception:
+            continue
+    return "0.1.0"
+
+
 def app_data_dir() -> Path:
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support"
@@ -47,6 +71,7 @@ def app_data_dir() -> Path:
 
 
 ROOT = DEV_ROOT
+APP_VERSION = app_version()
 STATIC = RESOURCE_ROOT / "static"
 DATA_DIR = app_data_dir()
 WORK = DATA_DIR / "work"
@@ -62,6 +87,37 @@ APIMART_IMAGE_URL = "https://api.apimart.ai/v1/images/generations"
 APIMART_VIDEO_URL = "https://api.apimart.ai/v1/videos/generations"
 APIMART_TASK_URL = "https://api.apimart.ai/v1/tasks"
 APIMART_UPLOAD_IMAGE_URL = "https://api.apimart.ai/v1/uploads/images"
+APIMART_UPLOAD_VIDEO_URL = "https://api.apimart.ai/v1/uploads/videos"
+APIMART_UPLOAD_AUDIO_URL = "https://api.apimart.ai/v1/uploads/audios"
+WECOM_APPID = "ww3356a195475005ac"
+WECOM_AGENTID = "1000024"
+WECOM_REDIRECT_URI = "https://sso.topsky.com/api/"
+WECOM_STATE = "video"
+WECOM_QR_CONNECT_URL = (
+    "https://open.work.weixin.qq.com/wwopen/sso/qrConnect"
+    f"?appid={WECOM_APPID}"
+    f"&agentid={WECOM_AGENTID}"
+    f"&redirect_uri={quote(WECOM_REDIRECT_URI, safe='')}"
+    f"&state={WECOM_STATE}"
+    "&lang=zh"
+)
+WECOM_LOGIN_URL = "https://sso.topsky.com/api/login/{code}"
+DEFAULT_WECOM_WEBHOOK_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=e4a0df23-add9-4573-bcea-c606b9fac46a"
+DEFAULT_ARK_API_KEY = "ark-8d0e9805-035e-4994-ba45-a09c7b51047c-34053"
+DEFAULT_APIMART_API_KEY = "sk-rDsvyPdgzs1JpBmr7Y56lbtZjTxm36NTlE58iaTgrDq21AMA"
+DEFAULT_TOS_ENDPOINT = "https://tos-cn-shanghai.volces.com"
+DEFAULT_TOS_REGION = "cn-shanghai"
+DEFAULT_TOS_BUCKET = "aivideo-topsky"
+DEFAULT_TOS_ACCESS_KEY_ID = ""
+DEFAULT_TOS_SECRET_ACCESS_KEY = ""
+DEFAULT_TOS_PUBLIC_BASE_URL = "https://aivideo-topsky.tos-cn-shanghai.volces.com"
+DEFAULT_TOS_OBJECT_PREFIX = "ai-short-video-generations"
+DEFAULT_TLS_ENDPOINT = "https://tls-cn-shanghai.volces.com"
+DEFAULT_TLS_REGION = "cn-shanghai"
+DEFAULT_TLS_PROJECT_NAME = "aivideo"
+DEFAULT_TLS_TOPIC_NAME = "client-usage"
+DEFAULT_TLS_TTL_DAYS = 30
+WECOM_SESSION_TTL = timedelta(hours=72)
 FFMPEG_CANDIDATES = [
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
@@ -77,6 +133,10 @@ DOWNLOADS.mkdir(parents=True, exist_ok=True)
 GENERATIONS.mkdir(parents=True, exist_ok=True)
 TASKS: dict[str, dict] = {}
 TASK_LOCK = threading.Lock()
+AUTH_LOCK = threading.Lock()
+WECOM_SESSION: dict[str, object] = {}
+TLS_LOCK = threading.Lock()
+TLS_TOPIC_CACHE: dict[str, str] = {}
 
 
 class TaskCancelled(Exception):
@@ -186,24 +246,55 @@ def append_history(action: str, video: Path | None = None, **extra: object) -> N
     save_history([item, *load_history()])
 
 
+def storyboard_history_with_generated(all_shots: object, generated: list[dict], index: int | None = None) -> list[dict]:
+    if isinstance(all_shots, list) and all_shots:
+        history = [dict(shot) if isinstance(shot, dict) else shot for shot in all_shots[:24]]
+        if index is not None and 0 <= index < len(history) and generated:
+            if isinstance(history[index], dict):
+                history[index].update(generated[0])
+            else:
+                history[index] = generated[0]
+        elif len(generated) == len(history):
+            history = generated[:24]
+        elif generated:
+            by_shot = {str(item.get("shot") or ""): item for item in generated if isinstance(item, dict)}
+            for pos, shot in enumerate(history):
+                if isinstance(shot, dict) and str(shot.get("shot") or "") in by_shot:
+                    history[pos].update(by_shot[str(shot.get("shot") or "")])
+        return [shot for shot in history if isinstance(shot, dict)]
+    return generated[:24]
+
+
+def ark_api_key_value(config: dict | None = None) -> str:
+    return os.environ.get("ARK_API_KEY") or DEFAULT_ARK_API_KEY
+
+
+def apimart_api_key_value(config: dict | None = None) -> str:
+    return os.environ.get("APIMART_API_KEY") or DEFAULT_APIMART_API_KEY
+
+
 def public_config() -> dict:
     config = load_config()
-    api_key = os.environ.get("ARK_API_KEY") or config.get("arkApiKey", "")
-    apimart_key = os.environ.get("APIMART_API_KEY") or config.get("apimartApiKey", "")
+    api_key = ark_api_key_value(config)
+    apimart_key = apimart_api_key_value(config)
+    douyin_cookie = str(config.get("douyinCookie") or "").strip()
     return {
+        "version": APP_VERSION,
         "hasArkApiKey": bool(api_key),
         "arkApiKeyMasked": f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 16 else "",
         "hasApimartApiKey": bool(apimart_key),
         "apimartApiKeyMasked": f"{apimart_key[:8]}...{apimart_key[-4:]}" if len(apimart_key) > 16 else "",
+        "hasDouyinCookie": bool(douyin_cookie),
+        "douyinCookieMasked": f"已配置，长度 {len(douyin_cookie)}" if douyin_cookie else "",
         "apimartImageSize": config.get("apimartImageSize", "9:16"),
         "apimartImageResolution": config.get("apimartImageResolution", "1k"),
+        "apimartImageQuality": config.get("apimartImageQuality", "medium"),
         "seedanceDuration": config.get("seedanceDuration", 5),
         "seedanceResolution": config.get("seedanceResolution", "720p"),
+        "seedanceSize": config.get("seedanceSize", "adaptive"),
+        "seedanceAudio": bool(config.get("seedanceAudio", True)),
         "ffmpegPath": config.get("ffmpegPath", ""),
         "detectedFfmpegPath": detect_ffmpeg_path() or "",
-        "wecomWebhookUrl": config.get("wecomWebhookUrl", ""),
-        "usageLogName": config.get("usageLogName", ""),
-        "usageLogDept": config.get("usageLogDept", ""),
         "downloadRetentionDays": download_retention_days(),
         "packageTemplate": config.get("packageTemplate", "none"),
         "packageTemplates": configured_package_templates(),
@@ -215,18 +306,86 @@ def now_text() -> str:
 
 
 def wecom_webhook_url() -> str:
-    return os.environ.get("WECOM_WEBHOOK_URL") or load_config().get("wecomWebhookUrl", "")
+    return DEFAULT_WECOM_WEBHOOK_URL
+
+
+def current_wecom_user() -> dict:
+    with AUTH_LOCK:
+        user = dict(WECOM_SESSION.get("userInfo") or {})
+        token = str(WECOM_SESSION.get("token") or "")
+        login_time = str(WECOM_SESSION.get("loginTime") or "")
+        if user:
+            try:
+                if datetime.now() - datetime.strptime(login_time, "%Y-%m-%d %H:%M:%S") > WECOM_SESSION_TTL:
+                    WECOM_SESSION.clear()
+                    return {}
+            except ValueError:
+                WECOM_SESSION.clear()
+                return {}
+    if user:
+        return {
+            "username": str(user.get("username") or user.get("modifiedName") or user.get("englishname") or "").strip(),
+            "deptName": str(user.get("deptName") or "").strip(),
+            "companyName": str(user.get("companyName") or "").strip(),
+            "email": str(user.get("email") or "").strip(),
+            "id": str(user.get("id") or "").strip(),
+            "token": token,
+        }
+    return {}
+
+
+def auth_state() -> dict:
+    user = current_wecom_user()
+    return {"loggedIn": bool(user), "user": user}
+
+
+def extract_wecom_code(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http://") or text.startswith("https://"):
+        parsed = urlparse(text)
+        return (parse_qs(parsed.query).get("code") or [""])[0].strip()
+    match = re.search(r"(?:code=)?([A-Za-z0-9_-]{8,})", text)
+    return match.group(1).strip() if match else text
+
+
+def login_with_wecom_code(code: str) -> dict:
+    code = extract_wecom_code(code)
+    if not code:
+        raise RuntimeError("未获取到企业微信登录 code。")
+    request = urllib.request.Request(
+        WECOM_LOGIN_URL.format(code=quote(code, safe="")),
+        headers={"accept": "application/json"},
+        method="GET",
+    )
+    try:
+        raw = urllib.request.urlopen(request, timeout=20, context=ark_ssl_context()).read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"企业微信登录失败：HTTP {exc.code} {body[:300]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"无法连接企业微信登录接口：{exc}") from exc
+    data = json.loads(raw.decode("utf-8") or "{}")
+    user = data.get("userInfo") if isinstance(data, dict) else None
+    if not isinstance(user, dict) or not user:
+        raise RuntimeError(str(data.get("desc") or data.get("message") or "企业微信登录信息为空。"))
+    with AUTH_LOCK:
+        WECOM_SESSION.clear()
+        WECOM_SESSION.update({
+            "token": data.get("token") or user.get("token") or "",
+            "userInfo": user,
+            "loginTime": now_text(),
+        })
+    notify_feature_used("企业微信登录", "扫码登录成功")
+    return auth_state()
 
 
 def usage_identity() -> tuple[str, str]:
-    config = load_config()
-    name = str(config.get("usageLogName", "")).strip()
-    dept = str(config.get("usageLogDept", "")).strip()
-    if not name:
-        name = os.environ.get("USER") or os.environ.get("USERNAME") or "本机用户"
-    if not dept:
-        dept = "未填写"
-    return name, dept
+    user = current_wecom_user()
+    if user:
+        return user.get("username") or "企业微信用户", user.get("deptName") or "未填写"
+    return "未登录用户", "未登录部门"
 
 
 def send_wecom_webhook(content: str) -> None:
@@ -253,18 +412,328 @@ def notify_wecom(content: str) -> None:
     threading.Thread(target=send_wecom_webhook, args=(content,), daemon=True).start()
 
 
+def tls_config() -> dict[str, object]:
+    return {
+        "endpoint": (os.environ.get("TLS_ENDPOINT") or DEFAULT_TLS_ENDPOINT).strip(),
+        "region": (os.environ.get("TLS_REGION") or DEFAULT_TLS_REGION).strip() or DEFAULT_TLS_REGION,
+        "project_name": (os.environ.get("TLS_PROJECT_NAME") or DEFAULT_TLS_PROJECT_NAME).strip() or DEFAULT_TLS_PROJECT_NAME,
+        "topic_name": (os.environ.get("TLS_TOPIC_NAME") or DEFAULT_TLS_TOPIC_NAME).strip() or DEFAULT_TLS_TOPIC_NAME,
+        "ttl": int(os.environ.get("TLS_TTL_DAYS") or DEFAULT_TLS_TTL_DAYS),
+        "access_key": (os.environ.get("TLS_ACCESS_KEY_ID") or os.environ.get("TOS_ACCESS_KEY_ID") or DEFAULT_TOS_ACCESS_KEY_ID).strip(),
+        "secret_key": (os.environ.get("TLS_SECRET_ACCESS_KEY") or os.environ.get("TOS_SECRET_ACCESS_KEY") or DEFAULT_TOS_SECRET_ACCESS_KEY).strip(),
+    }
+
+
+def tls_client(config: dict | None = None):
+    config = config or tls_config()
+    from volcengine.tls.TLSService import TLSService
+    return TLSService(
+        str(config["endpoint"]),
+        str(config["access_key"]),
+        str(config["secret_key"]),
+        str(config["region"]),
+        timeout=20,
+    )
+
+
+def resolve_tls_topic_id(client, config: dict) -> str:
+    cache_key = f"{config['endpoint']}|{config['region']}|{config['project_name']}|{config['topic_name']}"
+    with TLS_LOCK:
+        cached = TLS_TOPIC_CACHE.get(cache_key)
+        if cached:
+            return cached
+
+    from volcengine.tls.tls_requests import CreateTopicRequest, DescribeProjectsRequest, DescribeTopicsRequest
+
+    projects_resp = client.describe_projects(DescribeProjectsRequest(
+        project_name=str(config["project_name"]),
+        is_full_name=True,
+        page_size=10,
+    ))
+    projects = projects_resp.get_projects()
+    if not projects:
+        raise RuntimeError(f"TLS 日志项目不存在：{config['project_name']}")
+    project_id = projects[0].project_id
+
+    topics_resp = client.describe_topics(DescribeTopicsRequest(
+        project_id=project_id,
+        topic_name=str(config["topic_name"]),
+        is_full_name=True,
+        page_size=10,
+    ))
+    topics = topics_resp.get_topics()
+    topic_id = topics[0].topic_id if topics else ""
+    if not topic_id:
+        topic_id = client.create_topic(CreateTopicRequest(
+            topic_name=str(config["topic_name"]),
+            project_id=project_id,
+            ttl=int(config.get("ttl") or DEFAULT_TLS_TTL_DAYS),
+            shard_count=1,
+            description="AI短视频创作工具客户端使用日志",
+            auto_split=True,
+        )).get_topic_id()
+
+    with TLS_LOCK:
+        TLS_TOPIC_CACHE[cache_key] = topic_id
+    return topic_id
+
+
+def send_tls_log(record: dict[str, object]) -> None:
+    try:
+        from volcengine.tls.tls_requests import PutLogsV2Logs, PutLogsV2Request
+
+        config = tls_config()
+        if not config["access_key"] or not config["secret_key"]:
+            return
+        client = tls_client(config)
+        topic_id = resolve_tls_topic_id(client, config)
+        log = PutLogsV2Logs(
+            source=socket.gethostname() or "client",
+            filename="ai-short-video-client",
+            log_tags={"app": "AI短视频创作工具", "version": APP_VERSION},
+        )
+        contents = {}
+        for key, value in record.items():
+            if value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                contents[key] = json.dumps(value, ensure_ascii=False)[:8000]
+            else:
+                contents[key] = str(value)[:8000]
+        log.add_log(contents, log_time=int(time.time()))
+        client.put_logs_v2(PutLogsV2Request(topic_id, log))
+    except Exception:
+        pass
+
+
+def notify_tls(record: dict[str, object]) -> None:
+    threading.Thread(target=send_tls_log, args=(record,), daemon=True).start()
+
+
+def usage_log_base(event_type: str, feature: str) -> dict[str, object]:
+    user, dept = usage_identity()
+    current_user = current_wecom_user()
+    return {
+        "event_type": event_type,
+        "feature": feature,
+        "user": user,
+        "dept": dept,
+        "company": current_user.get("companyName", ""),
+        "email": current_user.get("email", ""),
+        "user_id": current_user.get("id", ""),
+        "version": APP_VERSION,
+        "time": now_text(),
+        "platform": sys.platform,
+    }
+
+
 def notify_feature_used(feature: str, details: str = "") -> None:
     user, dept = usage_identity()
     lines = [
         "AI短视频创作工具功能使用通知",
         f"> 姓名：{user}",
         f"> 部门：{dept}",
+        f"> 版本：{APP_VERSION}",
         f"> 功能：{feature}",
         f"> 时间：{now_text()}",
     ]
     if details:
-        lines.append(f"> 详情：{details[:500]}")
+        lines.append(f"> 详情：{details[:2500]}")
     notify_wecom("\n".join(lines))
+    record = usage_log_base("feature", feature)
+    record["details"] = details
+    notify_tls(record)
+
+
+def compact_log_text(value: object, limit: int = 700) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1] + "…"
+
+
+def tos_config() -> dict[str, str]:
+    endpoint = (os.environ.get("TOS_ENDPOINT") or DEFAULT_TOS_ENDPOINT).strip().rstrip("/")
+    if endpoint and not endpoint.startswith(("http://", "https://")):
+        endpoint = f"https://{endpoint}"
+    bucket = (os.environ.get("TOS_BUCKET") or DEFAULT_TOS_BUCKET).strip()
+    access_key = (os.environ.get("TOS_ACCESS_KEY_ID") or DEFAULT_TOS_ACCESS_KEY_ID).strip()
+    secret_key = (os.environ.get("TOS_SECRET_ACCESS_KEY") or DEFAULT_TOS_SECRET_ACCESS_KEY).strip()
+    region = (os.environ.get("TOS_REGION") or DEFAULT_TOS_REGION).strip() or DEFAULT_TOS_REGION
+    return {
+        "endpoint": endpoint,
+        "bucket": bucket,
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "region": region,
+        "service": os.environ.get("TOS_SERVICE", "tos").strip() or "tos",
+        "prefix": os.environ.get("TOS_OBJECT_PREFIX", DEFAULT_TOS_OBJECT_PREFIX).strip().strip("/") or DEFAULT_TOS_OBJECT_PREFIX,
+        "public_base_url": (os.environ.get("TOS_PUBLIC_BASE_URL") or DEFAULT_TOS_PUBLIC_BASE_URL).strip().rstrip("/"),
+        "acl": os.environ.get("TOS_ACL", "").strip(),
+    }
+
+
+def tos_enabled() -> bool:
+    config = tos_config()
+    return bool(config["endpoint"] and config["bucket"] and config["access_key"] and config["secret_key"])
+
+
+def tos4_signing_key(secret_key: str, date_stamp: str, region: str, service: str) -> bytes:
+    key_date = hmac.new(("TOS4" + secret_key).encode("utf-8"), date_stamp.encode("utf-8"), hashlib.sha256).digest()
+    key_region = hmac.new(key_date, region.encode("utf-8"), hashlib.sha256).digest()
+    key_service = hmac.new(key_region, service.encode("utf-8"), hashlib.sha256).digest()
+    return hmac.new(key_service, b"request", hashlib.sha256).digest()
+
+
+def quote_object_key(value: str) -> str:
+    return "/".join(quote(part, safe="") for part in value.split("/"))
+
+
+def tos_public_url(object_key: str, request_url: str = "") -> str:
+    config = tos_config()
+    if config["public_base_url"]:
+        return f"{config['public_base_url']}/{quote_object_key(object_key)}"
+    return request_url
+
+
+def upload_to_tos(path: Path, kind: str = "asset") -> dict:
+    if not tos_enabled():
+        return {"enabled": False, "objectKey": "", "url": "", "uploadUrl": "", "error": "TOS 未配置"}
+    if not path.exists() or not path.is_file():
+        return {"enabled": True, "objectKey": "", "url": "", "uploadUrl": "", "error": f"文件不存在：{path}"}
+    config = tos_config()
+    parsed = urlparse(config["endpoint"])
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {"enabled": True, "objectKey": "", "url": "", "uploadUrl": "", "error": f"TOS endpoint 无效：{config['endpoint']}"}
+    date_stamp = datetime.utcnow().strftime("%Y%m%d")
+    amz_date = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", path.name).strip("._") or f"{uuid.uuid4().hex}{path.suffix}"
+    object_key = f"{config['prefix']}/{date_stamp}/{uuid.uuid4().hex[:12]}_{safe_name}"
+    upload_host = parsed.netloc if parsed.netloc.startswith(f"{config['bucket']}.") else f"{config['bucket']}.{parsed.netloc}"
+    canonical_uri = f"/{quote_object_key(object_key)}"
+    request_url = f"{parsed.scheme}://{upload_host}{canonical_uri}"
+    public_url = tos_public_url(object_key, request_url)
+    body = path.read_bytes()
+    payload_hash = hashlib.sha256(body).hexdigest()
+    content_type = mimetypes.guess_type(path.name)[0] or ("video/mp4" if kind == "video" else "image/png")
+    try:
+        import tos
+        sdk_endpoint = parsed.netloc.removeprefix(f"{config['bucket']}.")
+        client = tos.TosClientV2(
+            config["access_key"],
+            config["secret_key"],
+            sdk_endpoint,
+            config["region"],
+        )
+        with path.open("rb") as file:
+            client.put_object(
+                config["bucket"],
+                object_key,
+                content=file,
+                content_type=content_type,
+            )
+        return {"enabled": True, "objectKey": object_key, "url": public_url, "uploadUrl": request_url, "error": ""}
+    except ImportError:
+        pass
+    except Exception as exc:
+        return {"enabled": True, "objectKey": object_key, "url": public_url, "uploadUrl": request_url, "error": f"TOS SDK 上传失败：{exc}"}
+
+    headers = {
+        "Host": upload_host,
+        "x-tos-content-sha256": payload_hash,
+        "x-tos-date": amz_date,
+    }
+    if config["acl"]:
+        headers["x-tos-acl"] = config["acl"]
+    signed_header_names = sorted(headers.keys(), key=str.lower)
+    canonical_headers = "".join(f"{name.lower()}:{headers[name]}\n" for name in signed_header_names)
+    signed_headers = ";".join(name.lower() for name in signed_header_names)
+    canonical_request = "\n".join([
+        "PUT",
+        canonical_uri,
+        "",
+        canonical_headers,
+        signed_headers,
+        payload_hash,
+    ])
+    scope = f"{date_stamp}/{config['region']}/{config['service']}/request"
+    string_to_sign = "\n".join([
+        "TOS4-HMAC-SHA256",
+        amz_date,
+        scope,
+        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+    ])
+    signature = hmac.new(
+        tos4_signing_key(config["secret_key"], date_stamp, config["region"], config["service"]),
+        string_to_sign.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    headers["Authorization"] = (
+        "TOS4-HMAC-SHA256 "
+        f"Credential={config['access_key']}/{scope}, "
+        f"SignedHeaders={signed_headers}, "
+        f"Signature={signature}"
+    )
+    headers["Content-Type"] = content_type
+    request = urllib.request.Request(request_url, data=body, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(request, timeout=240, context=ark_ssl_context()) as resp:
+            if resp.status >= 300:
+                return {"enabled": True, "objectKey": object_key, "url": public_url, "uploadUrl": request_url, "error": f"HTTP {resp.status}"}
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="replace")
+        return {"enabled": True, "objectKey": object_key, "url": public_url, "uploadUrl": request_url, "error": f"HTTP {exc.code}: {body_text[:500]}"}
+    except Exception as exc:
+        return {"enabled": True, "objectKey": object_key, "url": public_url, "uploadUrl": request_url, "error": str(exc)}
+    return {"enabled": True, "objectKey": object_key, "url": public_url, "uploadUrl": request_url, "error": ""}
+
+
+def store_generated_asset(path: Path, kind: str, task_id: str | None = None) -> dict:
+    if not tos_enabled():
+        return {"enabled": False, "objectKey": "", "url": "", "uploadUrl": "", "error": "TOS 未配置"}
+    return upload_to_tos(path, kind=kind)
+
+
+def notify_generation_asset(feature: str, prompt: str, params: dict, storage: dict | str = "", source_url: str = "", local_path: str = "") -> None:
+    user, dept = usage_identity()
+    param_text = "，".join(f"{key}={value}" for key, value in params.items() if value not in {"", None})
+    storage_data = storage if isinstance(storage, dict) else {"url": str(storage or ""), "objectKey": "", "error": ""}
+    storage_url = str(storage_data.get("url") or "")
+    storage_key = str(storage_data.get("objectKey") or "")
+    storage_error = str(storage_data.get("error") or "")
+    lines = [
+        "AI短视频创作工具生成素材通知",
+        f"> 姓名：{user}",
+        f"> 部门：{dept}",
+        f"> 版本：{APP_VERSION}",
+        f"> 功能：{feature}",
+        f"> 时间：{now_text()}",
+    ]
+    if param_text:
+        lines.append(f"> 参数：{param_text}")
+    lines.append(f"> 提示词：{compact_log_text(prompt, 1300) or '未记录到提示词'}")
+    if storage_key:
+        lines.append(f"> 对象存储路径：{storage_key}")
+    if storage_url:
+        lines.append(f"> 对象存储链接：{storage_url}")
+    if storage_error:
+        lines.append(f"> 对象存储状态：上传失败：{compact_log_text(storage_error, 260)}")
+    if source_url:
+        lines.append(f"> 生成平台链接：{source_url}")
+    if local_path:
+        lines.append(f"> 本地路径：{local_path}")
+    notify_wecom("\n".join(lines))
+    record = usage_log_base("generation_asset", feature)
+    record.update({
+        "prompt": prompt,
+        "params": params,
+        "storage_path": storage_key,
+        "storage_url": storage_url,
+        "storage_error": storage_error,
+        "source_url": source_url,
+        "local_path": local_path,
+    })
+    notify_tls(record)
 
 
 def detect_ffmpeg_path() -> str | None:
@@ -401,6 +870,258 @@ def cleanup_old_downloads() -> int:
     return removed
 
 
+def needs_fresh_cookies_error(error: object) -> bool:
+    text = str(error or "").lower()
+    return "fresh cookies" in text or "cookies" in text and "needed" in text
+
+
+def browser_profile_names(browser: str) -> list[str]:
+    if is_macos():
+        roots = {
+            "chrome": Path.home() / "Library" / "Application Support" / "Google" / "Chrome",
+            "edge": Path.home() / "Library" / "Application Support" / "Microsoft Edge",
+            "firefox": Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles",
+        }
+    elif is_windows():
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        roaming = Path(os.environ.get("APPDATA", ""))
+        roots = {
+            "chrome": local / "Google" / "Chrome" / "User Data",
+            "edge": local / "Microsoft" / "Edge" / "User Data",
+            "firefox": roaming / "Mozilla" / "Firefox" / "Profiles",
+        }
+    else:
+        roots = {
+            "chrome": Path.home() / ".config" / "google-chrome",
+            "edge": Path.home() / ".config" / "microsoft-edge",
+            "firefox": Path.home() / ".mozilla" / "firefox",
+        }
+    root = roots.get(browser)
+    if not root or not root.exists():
+        return []
+    if browser == "firefox":
+        return [item.name for item in root.iterdir() if (item / "cookies.sqlite").exists()]
+    return [item.name for item in root.iterdir() if (item / "Cookies").exists()]
+
+
+def browser_cookie_sources() -> list[tuple[str, tuple]]:
+    configured = str(load_config().get("downloadCookieBrowser") or "auto").strip().lower()
+    if configured and configured not in {"auto", "none", "off"}:
+        profiles = browser_profile_names(configured)
+        return [(f"{configured} {profile}", (configured, profile, None, None)) for profile in profiles] or [(configured, (configured, None, None, None))]
+    if configured in {"none", "off"}:
+        return []
+    if is_macos():
+        browsers = ["chrome", "edge", "safari", "firefox"]
+    if is_windows():
+        browsers = ["chrome", "edge", "firefox"]
+    if not is_macos() and not is_windows():
+        browsers = ["chrome", "edge", "firefox"]
+    sources: list[tuple[str, tuple]] = []
+    for browser in browsers:
+        profiles = browser_profile_names(browser)
+        if profiles:
+            sources.extend((f"{browser} {profile}", (browser, profile, None, None)) for profile in profiles)
+        else:
+            sources.append((browser, (browser, None, None, None)))
+    return sources
+
+
+def browser_cookie_cli_arg(source: tuple) -> str:
+    browser, profile, keyring, container = (list(source) + [None, None, None, None])[:4]
+    parts = [str(browser)]
+    if profile:
+        parts.append(str(profile))
+    if keyring:
+        parts.append(str(keyring))
+    if container:
+        parts.append(str(container))
+    return ":".join(parts)
+
+
+def configured_douyin_cookie() -> str:
+    return str(load_config().get("douyinCookie") or os.environ.get("DOUYIN_COOKIE") or "").strip()
+
+
+def parse_cookie_header(cookie_text: str) -> list[tuple[str, str]]:
+    text = cookie_text.strip()
+    text = re.sub(r"^\s*cookie\s*:\s*", "", text, flags=re.I)
+    pairs = []
+    for part in re.split(r";\s*", text):
+        if not part or "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        pairs.append((name, value))
+    return pairs
+
+
+def write_douyin_cookie_file(out_dir: Path) -> str:
+    pairs = parse_cookie_header(configured_douyin_cookie())
+    if not pairs:
+        return ""
+    cookie_file = out_dir / "douyin_cookies.txt"
+    domains = [".douyin.com", "douyin.com", ".iesdouyin.com", ".snssdk.com", ".amemv.com"]
+    lines = ["# Netscape HTTP Cookie File"]
+    expiry = str(int((datetime.now() + timedelta(days=30)).timestamp()))
+    for domain in domains:
+        include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
+        for name, value in pairs:
+            lines.append("\t".join([domain, include_subdomains, "/", "TRUE", expiry, name, value]))
+    cookie_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(cookie_file)
+
+
+def douyin_mobile_headers(referer: str = "https://www.douyin.com/") -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 aweme_32.0.0",
+        "Referer": referer,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    cookie = configured_douyin_cookie()
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def decode_douyin_escaped_url(value: str) -> str:
+    return (
+        value
+        .replace(chr(92) + "u002F", "/")
+        .replace(chr(92) + "/", "/")
+        .replace("&amp;", "&")
+    )
+
+
+def extract_douyin_video_id(value: str) -> str:
+    match = re.search(r"/video/(\d+)", value or "")
+    if match:
+        return match.group(1)
+    match = re.search(r"aweme_id[=:](\d+)", value or "")
+    return match.group(1) if match else ""
+
+
+def fetch_douyin_page(url: str) -> tuple[str, str]:
+    request = urllib.request.Request(url, headers=douyin_mobile_headers())
+    with urllib.request.urlopen(request, timeout=30, context=ark_ssl_context()) as resp:
+        final_url = resp.geturl()
+        html_text = resp.read().decode("utf-8", errors="replace")
+    return final_url, html_text
+
+
+def extract_douyin_play_url(html_text: str) -> str:
+    candidates = re.findall(r"https:[^\"<>]+aweme\.snssdk\.com[^\"<>]+", html_text or "")
+    for raw_url in candidates:
+        url = decode_douyin_escaped_url(raw_url)
+        if "/aweme/v1/play" in url:
+            return url
+    return ""
+
+
+def extract_douyin_title(html_text: str, fallback: str) -> str:
+    for pattern in (r'"desc":"([^"]+)"', r'"share_title":"([^"]+)"', r"<title>(.*?)</title>"):
+        match = re.search(pattern, html_text or "", flags=re.S)
+        if match:
+            value = match.group(1)
+            if chr(92) + "u" in value or chr(92) + "/" in value:
+                value = value.encode("utf-8").decode("unicode_escape", errors="ignore")
+            value = re.sub(r"\s+", " ", value).strip()
+            if value:
+                return value[:80]
+    return fallback
+
+
+def safe_filename(value: str) -> str:
+    text = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", str(value or "")).strip(" ._")
+    return text or "douyin_video"
+
+
+def download_direct_video_url(url: str, output: Path, referer: str, task_id: str | None = None) -> Path:
+    ensure_not_cancelled(task_id)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(url, headers=douyin_mobile_headers(referer))
+    with urllib.request.urlopen(request, timeout=60, context=ark_ssl_context()) as resp:
+        content_type = str(resp.headers.get("content-type") or "").lower()
+        if "video" not in content_type and "octet-stream" not in content_type:
+            preview = resp.read(300).decode("utf-8", errors="replace")
+            raise RuntimeError(f"播放地址没有返回视频数据：{content_type} {preview[:120]}")
+        total = int(resp.headers.get("content-length") or 0)
+        done = 0
+        with output.open("wb") as file:
+            while True:
+                ensure_not_cancelled(task_id)
+                chunk = resp.read(1024 * 512)
+                if not chunk:
+                    break
+                file.write(chunk)
+                done += len(chunk)
+                if task_id and total:
+                    task_update(task_id, 30 + int(min(1.0, done / max(1, total)) * 55), "正在下载抖音视频")
+    return output
+
+
+def download_douyin_from_page(url: str, out_dir: Path, task_id: str | None = None) -> dict:
+    if task_id:
+        task_update(task_id, 22, "正在尝试从抖音页面提取播放地址")
+    page_url, html_text = fetch_douyin_page(url)
+    play_url = extract_douyin_play_url(html_text)
+    if not play_url:
+        raise RuntimeError("没有从抖音页面中找到可下载播放地址。")
+    video_id = extract_douyin_video_id(page_url) or uuid.uuid4().hex[:10]
+    title = extract_douyin_title(html_text, f"douyin_{video_id}")
+    output = out_dir / f"{safe_filename(title)[:70]}_{video_id}.mp4"
+    download_direct_video_url(play_url, output, page_url, task_id=task_id)
+    if task_id:
+        task_update(task_id, 96, "正在读取下载视频信息")
+    duration = media_duration_seconds(output)
+    return {
+        "path": str(output),
+        "url": url,
+        "title": title,
+        "duration": seconds_to_clock(duration) if duration > 0 else "未知",
+        "method": "douyin_page_fallback",
+    }
+
+
+def download_cookie_help() -> str:
+    return (
+        "抖音要求使用新鲜 Cookie 才能下载。请在设置里粘贴抖音 Cookie，或先在本机浏览器打开并刷新一次抖音后重试。"
+    )
+
+
+def ytdlp_base_options(out_dir: Path, hook) -> dict:
+    options = {
+        "outtmpl": str(out_dir / "%(title).80s_%(id)s.%(ext)s"),
+        "format": "bv*+ba/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "progress_hooks": [hook],
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+            "Referer": "https://www.douyin.com/",
+        },
+    }
+    cookie_file = write_douyin_cookie_file(out_dir)
+    if cookie_file:
+        options["cookiefile"] = cookie_file
+    return options
+
+
+def run_ytdlp_download(yt_dlp, url: str, options: dict, task_id: str | None = None) -> tuple[dict, str]:
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+        ensure_not_cancelled(task_id)
+        filename = ydl.prepare_filename(info)
+        if options.get("merge_output_format") and Path(filename).suffix.lower() != ".mp4":
+            filename = str(Path(filename).with_suffix(".mp4"))
+        return info, filename
+
+
 def download_video_from_url(share_text: str, task_id: str | None = None) -> dict:
     cleanup_old_downloads()
     url = extract_share_url(share_text)
@@ -434,29 +1155,35 @@ def download_video_from_url(share_text: str, task_id: str | None = None) -> dict
                 if task_id:
                     task_update(task_id, 88, "正在整理视频文件")
 
-        options = {
-            "outtmpl": str(out_dir / "%(title).80s_%(id)s.%(ext)s"),
-            "format": "bv*+ba/best",
-            "merge_output_format": "mp4",
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "progress_hooks": [hook],
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126 Safari/537.36",
-            },
-        }
+        options = ytdlp_base_options(out_dir, hook)
+        last_error: Exception | None = None
         try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=True)
-                ensure_not_cancelled(task_id)
-                filename = ydl.prepare_filename(info)
-                if options.get("merge_output_format") and Path(filename).suffix.lower() != ".mp4":
-                    filename = str(Path(filename).with_suffix(".mp4"))
+            info, filename = run_ytdlp_download(yt_dlp, url, options, task_id=task_id)
         except TaskCancelled:
             raise
         except Exception as exc:
-            raise RuntimeError(f"下载失败：{exc}")
+            last_error = exc
+            if not needs_fresh_cookies_error(exc):
+                raise RuntimeError(f"下载失败：{exc}") from exc
+            for label, cookie_source in browser_cookie_sources():
+                ensure_not_cancelled(task_id)
+                if task_id:
+                    task_update(task_id, 18, f"抖音需要 Cookie，正在尝试读取 {label} Cookie")
+                cookie_options = dict(options)
+                cookie_options.pop("cookiefile", None)
+                cookie_options["cookiesfrombrowser"] = cookie_source
+                try:
+                    info, filename = run_ytdlp_download(yt_dlp, url, cookie_options, task_id=task_id)
+                    break
+                except TaskCancelled:
+                    raise
+                except Exception as cookie_exc:
+                    last_error = cookie_exc
+            else:
+                try:
+                    return download_douyin_from_page(url, out_dir, task_id=task_id)
+                except Exception as fallback_exc:
+                    raise RuntimeError(f"下载失败：{download_cookie_help()} fallback 也失败：{fallback_exc} 原始错误：{last_error}") from fallback_exc
         candidates = [Path(item) for item in downloaded]
         candidates.append(Path(filename))
         candidates.extend(sorted(out_dir.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True))
@@ -479,12 +1206,35 @@ def download_video_from_url(share_text: str, task_id: str | None = None) -> dict
     if task_id:
         task_update(task_id, 20, "正在下载视频")
     output = out_dir / "%(title).80s_%(id)s.%(ext)s"
-    result = run([
+    command = [
         binary, "--no-playlist", "-f", "bv*+ba/best",
-        "--merge-output-format", "mp4", "-o", str(output), url,
-    ], timeout=None, task_id=task_id)
+        "--merge-output-format", "mp4", "--referer", "https://www.douyin.com/",
+        "-o", str(output), url,
+    ]
+    cookie_file = write_douyin_cookie_file(out_dir)
+    if cookie_file:
+        command[1:1] = ["--cookies", cookie_file]
+    result = run(command, timeout=None, task_id=task_id)
+    if result.returncode != 0 and needs_fresh_cookies_error(result.stderr):
+        for label, cookie_source in browser_cookie_sources():
+            ensure_not_cancelled(task_id)
+            if task_id:
+                task_update(task_id, 18, f"抖音需要 Cookie，正在尝试读取 {label} Cookie")
+            result = run([
+                binary, "--no-playlist", "-f", "bv*+ba/best",
+                "--merge-output-format", "mp4", "--referer", "https://www.douyin.com/",
+                "--cookies-from-browser", browser_cookie_cli_arg(cookie_source),
+                "-o", str(output), url,
+            ], timeout=None, task_id=task_id)
+            if result.returncode == 0:
+                break
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout)[-1200:])
+        if needs_fresh_cookies_error(result.stderr):
+            try:
+                return download_douyin_from_page(url, out_dir, task_id=task_id)
+            except Exception as fallback_exc:
+                raise RuntimeError(f"下载失败：{download_cookie_help()} fallback 也失败：{fallback_exc} 原始错误：{result_tail(result, 900)}") from fallback_exc
+        raise RuntimeError(result_tail(result, 1200))
     video = next((item for item in sorted(out_dir.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True) if item.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}), None)
     if not video:
         raise RuntimeError("下载完成但没有找到视频文件。")
@@ -493,16 +1243,16 @@ def download_video_from_url(share_text: str, task_id: str | None = None) -> dict
 
 
 def ark_api_key() -> str:
-    key = os.environ.get("ARK_API_KEY") or load_config().get("arkApiKey", "")
+    key = ark_api_key_value()
     if not key:
-        raise RuntimeError("请先在设置里填写火山方舟 API Key。")
+        raise RuntimeError("火山方舟默认 API Key 不可用，请联系管理员。")
     return key
 
 
 def apimart_api_key() -> str:
-    key = os.environ.get("APIMART_API_KEY") or load_config().get("apimartApiKey", "")
+    key = apimart_api_key_value()
     if not key:
-        raise RuntimeError("请先在设置里填写 APIMart API Key。")
+        raise RuntimeError("AI 生成默认 API Key 不可用，请联系管理员。")
     return key
 
 
@@ -526,9 +1276,9 @@ def json_request(method: str, url: str, payload: dict | None = None, token: str 
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"APIMart 接口请求失败：HTTP {exc.code} {body[:800]}") from exc
+        raise RuntimeError(f"AI 生成接口请求失败：HTTP {exc.code} {body[:800]}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法连接 APIMart 接口：{exc}") from exc
+        raise RuntimeError(f"无法连接 AI 生成接口：{exc}") from exc
 
 
 def image_mime_type(path: Path) -> str:
@@ -540,6 +1290,27 @@ def image_mime_type(path: Path) -> str:
     if suffix == ".gif":
         return "image/gif"
     return "image/png"
+
+
+def media_mime_type(path: Path, kind: str) -> str:
+    suffix = path.suffix.lower()
+    if kind == "video":
+        if suffix == ".mov":
+            return "video/quicktime"
+        if suffix == ".webm":
+            return "video/webm"
+        if suffix == ".mkv":
+            return "video/x-matroska"
+        return "video/mp4"
+    if suffix == ".wav":
+        return "audio/wav"
+    if suffix == ".m4a":
+        return "audio/mp4"
+    if suffix == ".aac":
+        return "audio/aac"
+    if suffix == ".flac":
+        return "audio/flac"
+    return "audio/mpeg"
 
 
 def apimart_upload_image(path: Path, task_id: str | None = None) -> str:
@@ -571,12 +1342,56 @@ def apimart_upload_image(path: Path, task_id: str | None = None) -> str:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"APIMart 参考图上传失败：HTTP {exc.code} {body_text[:800]}") from exc
+        raise RuntimeError(f"参考图上传失败：HTTP {exc.code} {body_text[:800]}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法上传参考图到 APIMart：{exc}") from exc
+        raise RuntimeError(f"无法上传参考图到 AI 生成接口：{exc}") from exc
     url = result.get("url") if isinstance(result, dict) else ""
     if not url:
-        raise RuntimeError(f"APIMart 上传参考图未返回 URL：{json.dumps(result, ensure_ascii=False)[:800]}")
+        raise RuntimeError(f"上传参考图未返回 URL：{json.dumps(result, ensure_ascii=False)[:800]}")
+    return str(url)
+
+
+def apimart_upload_media(path: Path, kind: str, task_id: str | None = None) -> str:
+    ensure_not_cancelled(task_id)
+    if not path.exists() or not path.is_file():
+        raise RuntimeError(f"参考素材不存在：{path}")
+    if kind == "video":
+        endpoint = APIMART_UPLOAD_VIDEO_URL
+        allowed = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+        label = "参考视频"
+    else:
+        endpoint = APIMART_UPLOAD_AUDIO_URL
+        allowed = {".mp3", ".wav", ".m4a", ".aac", ".flac"}
+        label = "参考声音"
+    if path.suffix.lower() not in allowed:
+        raise RuntimeError(f"{label}格式不支持：{path.name}")
+    boundary = f"----apimart-{uuid.uuid4().hex}"
+    header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
+        f"Content-Type: {media_mime_type(path, kind)}\r\n\r\n"
+    ).encode("utf-8")
+    body = header + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {apimart_api_key()}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=300, context=ark_ssl_context()) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{label}上传失败：HTTP {exc.code} {body_text[:800]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"无法上传{label}到 AI 生成接口：{exc}") from exc
+    url = result.get("url") if isinstance(result, dict) else ""
+    if not url:
+        raise RuntimeError(f"上传{label}未返回 URL：{json.dumps(result, ensure_ascii=False)[:800]}")
     return str(url)
 
 
@@ -584,12 +1399,12 @@ def apimart_submit(url: str, payload: dict, task_id: str | None = None) -> str:
     ensure_not_cancelled(task_id)
     result = json_request("POST", url, payload, token=apimart_api_key(), timeout=120)
     if int(result.get("code", 0)) != 200:
-        raise RuntimeError(f"APIMart 提交失败：{json.dumps(result, ensure_ascii=False)[:800]}")
+        raise RuntimeError(f"AI 生成任务提交失败：{json.dumps(result, ensure_ascii=False)[:800]}")
     data = result.get("data")
     first = data[0] if isinstance(data, list) and data else {}
     remote_task_id = first.get("task_id") or first.get("id")
     if not remote_task_id:
-        raise RuntimeError(f"APIMart 未返回任务 ID：{json.dumps(result, ensure_ascii=False)[:800]}")
+        raise RuntimeError(f"AI 生成任务未返回任务 ID：{json.dumps(result, ensure_ascii=False)[:800]}")
     return str(remote_task_id)
 
 
@@ -599,10 +1414,10 @@ def apimart_poll(remote_task_id: str, task_id: str | None = None, base_progress:
         ensure_not_cancelled(task_id)
         elapsed = datetime.now().timestamp() - started
         if elapsed > timeout_seconds:
-            raise RuntimeError("APIMart 任务等待超时，请稍后在平台任务记录中查看，或降低清晰度后重试。")
+            raise RuntimeError("AI 生成任务等待超时，请稍后重试，或降低清晰度后再生成。")
         result = json_request("GET", f"{APIMART_TASK_URL}/{remote_task_id}?language=zh", token=apimart_api_key(), timeout=60)
         if int(result.get("code", 0)) != 200:
-            raise RuntimeError(f"APIMart 查询失败：{json.dumps(result, ensure_ascii=False)[:800]}")
+            raise RuntimeError(f"AI 生成任务查询失败：{json.dumps(result, ensure_ascii=False)[:800]}")
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
         status = str(data.get("status") or "").lower()
         try:
@@ -610,12 +1425,12 @@ def apimart_poll(remote_task_id: str, task_id: str | None = None, base_progress:
         except (TypeError, ValueError):
             remote_progress = min(95, int(elapsed / max(1, timeout_seconds) * 100))
         if task_id:
-            task_update(task_id, base_progress + int(remote_progress / 100 * span), f"APIMart 生成中：{status or 'processing'} {remote_progress}%")
+            task_update(task_id, base_progress + int(remote_progress / 100 * span), f"AI 生成中：{status or 'processing'} {remote_progress}%")
         if status == "completed":
             return data
         if status in {"failed", "cancelled", "canceled"}:
             message = data.get("error") or data.get("message") or data.get("fail_reason") or status
-            raise RuntimeError(f"APIMart 任务失败：{message}")
+            raise RuntimeError(f"AI 生成任务失败：{message}")
         threading.Event().wait(3)
 
 
@@ -737,7 +1552,7 @@ def run(
             ensure_not_cancelled(task_id)
             try:
                 stdout, stderr = process.communicate(timeout=0.5 if timeout is None else min(0.5, max(0.01, remaining)))
-                return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+                return subprocess.CompletedProcess(cmd, process.returncode, safe_text(stdout), safe_text(stderr))
             except subprocess.TimeoutExpired:
                 if timeout is None:
                     continue
@@ -795,6 +1610,11 @@ def safe_text(value: object) -> str:
 
 
 def command_tail(result: subprocess.CompletedProcess[str], limit: int = 1200) -> str:
+    text = safe_text(getattr(result, "stderr", "")) or safe_text(getattr(result, "stdout", ""))
+    return text[-limit:] or "命令执行失败，但没有返回错误详情。"
+
+
+def result_tail(result: subprocess.CompletedProcess[str], limit: int = 1500) -> str:
     text = safe_text(getattr(result, "stderr", "")) or safe_text(getattr(result, "stdout", ""))
     return text[-limit:] or "命令执行失败，但没有返回错误详情。"
 
@@ -1502,18 +2322,94 @@ def storyboard_sample_times(video: Path) -> tuple[float, list[dict]]:
     duration = media_duration_seconds(video)
     if duration <= 0:
         raise RuntimeError("无法读取原片时长。")
-    count = min(12, max(6, int(duration // 25) + 1))
+    count = min(18, max(8, int(duration // 18) + 1))
     step = duration / (count + 1)
+    half_window = min(7.5, step / 2)
     samples = []
     for index in range(1, count + 1):
         time = step * index
         samples.append({
             "id": index,
             "time": round(time, 1),
-            "suggested_start": round(max(0.0, time - step / 2), 1),
-            "suggested_end": round(min(duration, time + step / 2), 1),
+            "suggested_start": round(max(0.0, time - half_window), 1),
+            "suggested_end": round(min(duration, time + half_window), 1),
         })
     return duration, samples
+
+
+def storyboard_dialogue_timeline(dialogues: list[dict], limit: int = 120) -> list[dict]:
+    timeline = []
+    for item in dialogues[:limit]:
+        try:
+            start = float(item.get("time", 0))
+            end = float(item.get("end", start + 1))
+        except (TypeError, ValueError):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        timeline.append({
+            "start": round(start, 1),
+            "end": round(max(start, end), 1),
+            "text": text[:120],
+        })
+    return timeline
+
+
+def dialogue_for_range(dialogues: list[dict], start: float, end: float) -> str:
+    texts = []
+    for item in dialogues:
+        try:
+            text_start = float(item.get("time", 0))
+            text_end = float(item.get("end", text_start + 1))
+        except (TypeError, ValueError):
+            continue
+        if text_end < start or text_start > end:
+            continue
+        text = str(item.get("text") or "").strip()
+        if text and text not in texts:
+            texts.append(text)
+        if len(" / ".join(texts)) >= 150:
+            break
+    return " / ".join(texts)[:160]
+
+
+def storyboard_prompt_payload(duration: float, requirement: str = "", samples: list[dict] | None = None, dialogue_timeline: list[dict] | None = None, direct_video: bool = False) -> dict:
+    task = "根据完整视频内容生成可执行的中文分镜脚本。请只返回严格 JSON，不要输出解释文字。" if direct_video else "根据视频代表帧、时间信息和字幕台词线索，生成可执行的中文分镜脚本。请只返回严格 JSON，不要输出解释文字。"
+    writing_rule = (
+        "每个镜头要相对独立，单个镜头时长根据实际内容决定，但不要超过15秒；时间段尽量连续且覆盖主要内容。"
+        "描述要具体，避免空泛。广告素材要突出卖点、价格、优惠、动作和转化点；剧情素材要突出人物、冲突、转折和钩子。"
+    )
+    if direct_video:
+        writing_rule += "请尽量结合视频画面、字幕和可识别语音判断真实台词；无法确认的台词返回空字符串，不要凭空改写或编造。"
+    else:
+        writing_rule += "dialogue 字段只能引用字幕台词线索中对应时间段能确认的内容，无法确认就返回空字符串，不要凭空改写或编造台词。"
+    payload = {
+        "task": task,
+        "video_duration": round(duration, 1),
+        "user_requirement": requirement or "用户没有额外要求，请按视频内容生成适合短视频剪辑和复刻拍摄的分镜脚本。",
+        "writing_rule": writing_rule,
+        "output_schema": {
+            "shots": [{
+                "shot": "镜号",
+                "start": "开始秒数",
+                "end": "结束秒数",
+                "scene": "画面描述",
+                "shotType": "景别，如特写/近景/中景/全景",
+                "camera": "运镜或镜头调度",
+                "action": "人物/商品/画面动作",
+                "dialogue": "关键台词，没有则空字符串",
+                "caption": "建议字幕/花字，没有则空字符串",
+                "edit": "剪辑节奏、转场或音效建议",
+            }],
+            "summary": "中文总结这个视频的分镜逻辑和成片方向",
+        },
+    }
+    if samples:
+        payload["samples"] = samples
+    if dialogue_timeline:
+        payload["dialogue_timeline"] = dialogue_timeline
+    return payload
 
 
 def normalize_storyboard(raw: object, duration: float) -> list[dict]:
@@ -1530,8 +2426,8 @@ def normalize_storyboard(raw: object, duration: float) -> list[dict]:
         except (TypeError, ValueError):
             start = (index - 1) * fallback_span
             end = start + fallback_span
-        start = max(0.0, min(duration, start))
-        end = max(start + 0.3, min(duration, end))
+        start = max(0.0, min(max(0.0, duration - 0.3), start))
+        end = max(start + 0.3, min(duration, start + 15.0, end))
         shots.append({
             "shot": str(item.get("shot") or index).strip()[:12],
             "start": round(start, 1),
@@ -1547,39 +2443,57 @@ def normalize_storyboard(raw: object, duration: float) -> list[dict]:
     return shots
 
 
+def analyze_ai_storyboard_by_video_url(video: Path, requirement: str = "", task_id: str | None = None) -> dict:
+    duration = media_duration_seconds(video)
+    if duration <= 0:
+        raise RuntimeError("无法读取原片时长。")
+    if task_id:
+        task_update(task_id, 8, "正在上传完整视频给豆包分析")
+    storage = store_generated_asset(video, "video", task_id=task_id)
+    video_url = str(storage.get("url") or "")
+    if not video_url or storage.get("error"):
+        raise RuntimeError(f"完整视频上传失败：{storage.get('error') or '未返回公网 URL'}")
+    content: list[dict] = [
+        {"type": "text", "text": json.dumps(storyboard_prompt_payload(duration, requirement, direct_video=True), ensure_ascii=False)},
+        {"type": "video_url", "video_url": {"url": video_url}},
+    ]
+    if task_id:
+        task_update(task_id, 32, "正在调用豆包直接解析完整视频")
+    ai = parse_ai_json(call_ark_chat(content, task_id=task_id))
+    shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
+    if not shots:
+        raise RuntimeError("豆包未基于完整视频返回可用分镜。")
+    return {
+        "shots": shots,
+        "summary": (ai.get("summary") or f"已根据完整视频生成 {len(shots)} 个分镜。") + "（已尝试直接上传完整视频给豆包分析）",
+        "duration": seconds_to_clock(duration),
+        "videoStorageUrl": video_url,
+        "videoStoragePath": storage.get("objectKey", ""),
+    }
+
+
 def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | None = None) -> dict:
+    try:
+        return analyze_ai_storyboard_by_video_url(video, requirement=requirement, task_id=task_id)
+    except Exception as direct_exc:
+        fallback_reason = compact_log_text(direct_exc, 260)
+        if task_id:
+            task_update(task_id, 6, "完整视频直传不可用，改用抽帧分析")
     duration, samples = storyboard_sample_times(video)
     storyboard_dir = WORK / f"storyboard_{uuid.uuid4().hex[:10]}"
     storyboard_dir.mkdir(parents=True, exist_ok=True)
+    if task_id:
+        task_update(task_id, 10, "正在识别字幕台词")
+    dialogues = extract_dialogue(video, storyboard_dir, task_id=task_id)
+    dialogue_timeline = storyboard_dialogue_timeline(dialogues)
     content: list[dict] = [{
         "type": "text",
-        "text": json.dumps({
-            "task": "根据视频代表帧和时间信息，生成可执行的中文分镜脚本。请只返回严格 JSON，不要输出解释文字。",
-            "video_duration": round(duration, 1),
-            "user_requirement": requirement or "用户没有额外要求，请按视频内容生成适合短视频剪辑和复刻拍摄的分镜脚本。",
-            "writing_rule": "每个镜头要相对独立，时间段连续且覆盖主要内容。描述要具体，避免空泛。广告素材要突出卖点、价格、优惠、动作和转化点；剧情素材要突出人物、冲突、转折和钩子。",
-            "output_schema": {
-                "shots": [{
-                    "shot": "镜号",
-                    "start": "开始秒数",
-                    "end": "结束秒数",
-                    "scene": "画面描述",
-                    "shotType": "景别，如特写/近景/中景/全景",
-                    "camera": "运镜或镜头调度",
-                    "action": "人物/商品/画面动作",
-                    "dialogue": "关键台词，没有则空字符串",
-                    "caption": "建议字幕/花字，没有则空字符串",
-                    "edit": "剪辑节奏、转场或音效建议",
-                }],
-                "summary": "中文总结这个视频的分镜逻辑和成片方向",
-            },
-            "samples": samples,
-        }, ensure_ascii=False),
+        "text": json.dumps(storyboard_prompt_payload(duration, requirement, samples=samples, dialogue_timeline=dialogue_timeline), ensure_ascii=False),
     }]
     for index, sample in enumerate(samples, start=1):
         ensure_not_cancelled(task_id)
         if task_id:
-            task_update(task_id, 12 + int(index / max(1, len(samples)) * 58), f"正在抽取分镜参考帧 {index}/{len(samples)}")
+            task_update(task_id, 52 + int(index / max(1, len(samples)) * 25), f"正在抽取分镜参考帧 {index}/{len(samples)}")
         data_url = frame_data_url(video, sample["time"], storyboard_dir, index, task_id=task_id)
         if data_url:
             content.append({"type": "text", "text": f"sample_id={sample['id']}，原片时间={sample['time']:.1f}秒，建议覆盖 {sample['suggested_start']:.1f}-{sample['suggested_end']:.1f} 秒。"})
@@ -1592,9 +2506,14 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
     shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
     if not shots:
         raise RuntimeError("AI 没有返回可用的分镜脚本，请换一段视频或稍后重试。")
+    if dialogue_timeline:
+        for shot in shots:
+            text = dialogue_for_range(dialogue_timeline, float(shot.get("start", 0)), float(shot.get("end", 0)))
+            if text:
+                shot["dialogue"] = text
     return {
         "shots": shots,
-        "summary": ai.get("summary") or f"已根据视频内容生成 {len(shots)} 个分镜。",
+        "summary": (ai.get("summary") or f"已根据视频内容生成 {len(shots)} 个分镜。") + f"（完整视频直传失败，已回退抽帧分析：{fallback_reason}）",
         "duration": seconds_to_clock(duration),
     }
 
@@ -1602,7 +2521,8 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
 def storyboard_image_prompt(shot: dict, index: int, reference_notes: str = "") -> str:
     parts = [
         "请生成一张适合短视频广告分镜的高清画面，真实商业摄影质感，主体清晰，构图干净，可直接作为视频首帧。",
-        "如果提供了参考图，请优先保持参考图中的人物脸型、发型、服装、商品外观、场景空间和整体风格一致；不要随意更换核心人物或场景设定。",
+        "必须保持核心人物一致：同一张脸、同一发型、同一服装轮廓、同一年龄气质、同一肤色和体型；不同镜头只改变姿态、表情、景别和机位。",
+        "如果提供了参考图，请优先保持参考图中的人物脸型、五官比例、发型、服装、商品外观、场景空间和整体风格一致；不要随意更换核心人物或场景设定。",
         f"镜头{shot.get('shot') or index}",
         f"画面：{shot.get('scene') or ''}",
         f"景别：{shot.get('shotType') or ''}",
@@ -1651,14 +2571,39 @@ def normalize_reference_images(raw: object) -> list[dict]:
     for item in raw[:16]:
         if isinstance(item, str):
             path = item.strip()
+            title = ""
+            prompt = ""
+            source = "upload"
+            src = ""
         elif isinstance(item, dict):
             path = str(item.get("path") or "").strip()
+            title = str(item.get("title") or "").strip()[:80]
+            prompt = str(item.get("prompt") or "").strip()[:1600]
+            source = str(item.get("source") or "upload").strip()[:20]
+            src = str(item.get("src") or "").strip()
+            url = str(item.get("url") or "").strip()
+            storage_url = str(item.get("storageUrl") or item.get("imageStorageUrl") or "").strip()
+            storage_path = str(item.get("storagePath") or item.get("imageStoragePath") or "").strip()
         else:
             path = ""
+            title = ""
+            prompt = ""
+            source = "upload"
+            src = ""
+            url = ""
+            storage_url = ""
+            storage_path = ""
         if not path:
             continue
         refs.append({
             "path": path,
+            "title": title,
+            "prompt": prompt,
+            "source": source,
+            "src": src,
+            "url": url,
+            "storageUrl": storage_url,
+            "storagePath": storage_path,
         })
     return refs
 
@@ -1668,9 +2613,32 @@ def reference_notes_text(refs: list[dict], description: str = "") -> str:
     if description:
         parts.append(f"用户说明：{description.strip()[:1000]}")
     for index, ref in enumerate(refs, start=1):
-        note = Path(str(ref.get("path") or "")).stem
+        note = str(ref.get("title") or "").strip() or Path(str(ref.get("path") or "")).stem
+        prompt = str(ref.get("prompt") or "").strip()
+        if prompt:
+            note = f"{note}，提示词：{prompt[:260]}"
         parts.append(f"第{index}张参考图：{note}")
     return "；".join(parts)[:1200]
+
+
+def upload_reference_asset_url(ref: dict, kind: str, task_id: str | None = None) -> str:
+    storage_url = str(ref.get("storageUrl") or ref.get("imageStorageUrl") or ref.get("videoStorageUrl") or "").strip()
+    if storage_url:
+        return storage_url
+    path_text = str(ref.get("path") or "").strip()
+    if path_text:
+        storage = store_generated_asset(Path(path_text).expanduser(), kind, task_id=task_id)
+        if storage.get("url") and not storage.get("error"):
+            ref["storageUrl"] = storage.get("url", "")
+            ref["storagePath"] = storage.get("objectKey", "")
+            ref["storageError"] = ""
+            ref["url"] = storage.get("url", "")
+            return str(storage.get("url") or "")
+        raise RuntimeError(f"参考素材上传到对象存储失败：{storage.get('error') or '未返回公网 URL'}")
+    url = str(ref.get("url") or "").strip()
+    if url:
+        return url
+    raise RuntimeError("参考素材缺少本地路径或公网 URL。")
 
 
 def upload_reference_images(refs: list[dict], task_id: str | None = None) -> list[str]:
@@ -1678,8 +2646,8 @@ def upload_reference_images(refs: list[dict], task_id: str | None = None) -> lis
     for index, ref in enumerate(refs, start=1):
         ensure_not_cancelled(task_id)
         if task_id:
-            task_update(task_id, 3 + int(index / max(1, len(refs)) * 14), f"正在上传参考图 {index}/{len(refs)}")
-        url = apimart_upload_image(Path(str(ref.get("path", ""))).expanduser(), task_id=task_id)
+            task_update(task_id, 3 + int(index / max(1, len(refs)) * 14), f"正在上传参考图到对象存储 {index}/{len(refs)}")
+        url = upload_reference_asset_url(ref, "image", task_id=task_id)
         ref["url"] = url
         urls.append(url)
     return urls
@@ -1688,6 +2656,9 @@ def upload_reference_images(refs: list[dict], task_id: str | None = None) -> lis
 def batch_storyboard_image_prompt(batch: list[tuple[int, dict]], reference_notes: str = "") -> str:
     lines = [
         f"请一次生成 {len(batch)} 张短视频分镜图，按下面镜头顺序一一对应输出。每张图都是独立分镜，但人物、商品、场景和整体视觉风格必须保持一致。",
+        "每张图只能表现对应镜头的画面内容、动作和场景，不要把其他镜头的动作、道具、字幕或场景混入当前镜头。",
+        "先在内部建立统一角色设定：同一人物在所有图中必须保持同一张脸、五官比例、发型、服装轮廓、年龄气质、肤色和体型。不要把同一角色画成不同人。",
+        "如果参考图说明中包含人物、商品或场景，请把它们作为全片视觉锚点；若包含上一批生成图，请严格延续上一批中的人物形象和画面风格。",
         "真实商业摄影质感，主体清晰，构图干净，可直接作为视频首帧。不要在画面里生成难以阅读的文字。",
     ]
     if reference_notes:
@@ -1705,12 +2676,172 @@ def batch_storyboard_image_prompt(batch: list[tuple[int, dict]], reference_notes
     return "\n".join(str(line).strip() for line in lines if str(line).strip())[:4000]
 
 
-def generate_storyboard_images(shots_raw: object, size: str = "9:16", resolution: str = "1k", references_raw: object = None, reference_description: str = "", task_id: str | None = None) -> dict:
+def storyboard_reference_prompt_schema(shots: list[dict]) -> str:
+    lines = [
+        "请分析下面的短视频分镜脚本，提取后续生成分镜图最需要固定一致的视觉参考元素。",
+        "优先提取：主要人物、核心商品、关键场景、品牌/画面风格。最多返回6个参考图提示词。",
+        "每个提示词用于 GPT-Image-2 生成一张参考图，必须具体描述外貌、服装、产品形态、场景细节、材质、色调和商业摄影风格。",
+        "只返回严格 JSON，不要输出解释文字。",
+        json.dumps({
+            "output_schema": {
+                "references": [{
+                    "title": "参考图名称，如 女主形象/产品外观/客厅场景",
+                    "type": "character/product/scene/style",
+                    "prompt": "中文生图提示词，具体可执行，不要出现不可控的长文字和字幕",
+                }],
+            },
+            "shots": [{
+                "shot": shot.get("shot"),
+                "scene": shot.get("scene"),
+                "shotType": shot.get("shotType"),
+                "camera": shot.get("camera"),
+                "action": shot.get("action"),
+                "dialogue": shot.get("dialogue"),
+                "caption": shot.get("caption"),
+            } for shot in shots[:24]],
+        }, ensure_ascii=False),
+    ]
+    return "\n".join(lines)[:6000]
+
+
+def normalize_reference_prompts(raw: object) -> list[dict]:
+    items = raw.get("references") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+    refs = []
+    for index, item in enumerate(items[:6], start=1):
+        if not isinstance(item, dict):
+            continue
+        prompt = str(item.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        title = str(item.get("title") or item.get("name") or f"AI参考图 {index}").strip()[:80]
+        ref_type = str(item.get("type") or "visual").strip()[:30]
+        refs.append({
+            "title": title,
+            "type": ref_type,
+            "prompt": prompt[:1600],
+        })
+    return refs
+
+
+def fallback_reference_prompts(shots: list[dict]) -> list[dict]:
+    text = "；".join(
+        str(value).strip()
+        for shot in shots[:8]
+        for value in [shot.get("scene"), shot.get("action"), shot.get("caption")]
+        if str(value or "").strip()
+    )[:1200]
+    return [{
+        "title": "整体视觉风格",
+        "type": "style",
+        "prompt": f"根据以下分镜内容生成短视频广告的统一视觉参考图，真实商业摄影质感，主体清晰，风格一致，适合作为后续分镜图的风格锚点：{text}",
+    }]
+
+
+def generate_reference_prompt_items(shots: list[dict], task_id: str | None = None) -> list[dict]:
+    if task_id:
+        task_update(task_id, 8, "正在分析分镜脚本并提取参考元素")
+    try:
+        ai = parse_ai_json(call_ark_chat([{"type": "text", "text": storyboard_reference_prompt_schema(shots)}], task_id=task_id))
+        refs = normalize_reference_prompts(ai)
+    except Exception:
+        refs = []
+    return refs or fallback_reference_prompts(shots)
+
+
+def generate_reference_image_from_prompt(prompt: str, title: str = "AI参考图", size: str = "9:16", resolution: str = "1k", quality: str = "medium", out_dir: Path | None = None, index: int = 1, task_id: str | None = None) -> dict:
+    size = size if size in {"auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "16:9", "9:16", "21:9"} or re.match(r"^\d+x\d+$", size or "") else "9:16"
+    resolution = resolution if resolution in {"1k", "2k", "4k"} else "1k"
+    quality = normalize_image_quality(quality)
+    out_dir = out_dir or (GENERATIONS / f"refs_{uuid.uuid4().hex[:10]}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model": "gpt-image-2-official",
+        "prompt": prompt[:1600],
+        "size": size,
+        "resolution": resolution,
+        "quality": quality,
+        "n": 1,
+    }
+    remote_task_id = apimart_submit(APIMART_IMAGE_URL, payload, task_id=task_id)
+    task_data = apimart_poll(remote_task_id, task_id=task_id, base_progress=20, span=65, timeout_seconds=900)
+    urls = result_urls(task_data, "images")
+    if not urls:
+        raise RuntimeError("GPT-Image-2 没有返回参考图。")
+    output = download_result_url(urls[0], out_dir / f"reference_{index:02d}.png", task_id=task_id)
+    storage = store_generated_asset(output, "image", task_id=task_id)
+    notify_generation_asset(
+        "AI生成参考图完成",
+        prompt,
+        {
+            "标题": title[:80],
+            "模型": payload["model"],
+            "比例": size,
+            "清晰度": resolution,
+            "质量": quality,
+        },
+        storage=storage,
+        source_url=urls[0],
+        local_path=str(output),
+    )
+    return {
+        "path": str(output),
+        "src": generation_public_path(output),
+        "url": urls[0],
+        "storageUrl": storage.get("url", ""),
+        "storagePath": storage.get("objectKey", ""),
+        "storageError": storage.get("error", ""),
+        "title": title[:80],
+        "prompt": prompt[:1600],
+        "source": "ai",
+    }
+
+
+def generate_storyboard_reference_images(shots_raw: object, size: str = "9:16", resolution: str = "1k", quality: str = "medium", existing_count: int = 0, task_id: str | None = None) -> dict:
+    shots = normalize_generation_shots(shots_raw)
+    if not shots:
+        raise RuntimeError("请先生成分镜脚本，再生成 AI 参考图。")
+    max_count = max(0, min(6, 16 - int(existing_count or 0)))
+    if max_count <= 0:
+        raise RuntimeError("参考图最多 16 张，请先删除一些参考图。")
+    prompts = generate_reference_prompt_items(shots, task_id=task_id)[:max_count]
+    out_dir = GENERATIONS / f"refs_{uuid.uuid4().hex[:10]}"
+    refs = []
+    for index, item in enumerate(prompts, start=1):
+        ensure_not_cancelled(task_id)
+        if task_id:
+            task_update(task_id, 18 + int((index - 1) / max(1, len(prompts)) * 74), f"正在生成 AI 参考图 {index}/{len(prompts)}")
+        refs.append(generate_reference_image_from_prompt(
+            item["prompt"],
+            title=item["title"],
+            size=size,
+            resolution=resolution,
+            quality=quality,
+            out_dir=out_dir,
+            index=index,
+            task_id=task_id,
+        ))
+    return {
+        "references": refs,
+        "count": len(refs),
+        "outputDir": str(out_dir),
+        "summary": f"已生成 {len(refs)} 张 AI 参考图，可调整提示词后重新生成。",
+    }
+
+
+def normalize_image_quality(value: object) -> str:
+    text = str(value or "medium").strip()
+    return text if text in {"auto", "low", "medium", "high"} else "medium"
+
+
+def generate_storyboard_images(shots_raw: object, size: str = "9:16", resolution: str = "1k", quality: str = "medium", references_raw: object = None, reference_description: str = "", task_id: str | None = None) -> dict:
     shots = normalize_generation_shots(shots_raw)
     if not shots:
         raise RuntimeError("请先生成分镜脚本，再生成分镜图。")
     size = size if size in {"auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "16:9", "9:16", "21:9"} or re.match(r"^\d+x\d+$", size or "") else "9:16"
     resolution = resolution if resolution in {"1k", "2k", "4k"} else "1k"
+    quality = normalize_image_quality(quality)
     references = normalize_reference_images(references_raw)
     reference_urls = upload_reference_images(references, task_id=task_id) if references else []
     reference_notes = reference_notes_text(references, reference_description)
@@ -1721,20 +2852,27 @@ def generate_storyboard_images(shots_raw: object, size: str = "9:16", resolution
     token_span = max(1, len(batches))
     loop_start = 20 if references else 3
     loop_span = 77 if references else 94
+    anchor_url = ""
     for batch_index, batch in enumerate(batches, start=1):
         ensure_not_cancelled(task_id)
         if task_id:
             task_update(task_id, loop_start + int((batch_index - 1) / token_span * loop_span), f"正在提交分镜图批次 {batch_index}/{len(batches)}")
+        batch_reference_urls = list(reference_urls)
+        batch_reference_notes = reference_notes
+        if anchor_url and anchor_url not in batch_reference_urls and len(batch_reference_urls) < 16:
+            batch_reference_urls.append(anchor_url)
+            batch_reference_notes = (batch_reference_notes + "；" if batch_reference_notes else "") + "上一批生成的第1张图是全片人物与风格锚点，后续分镜必须延续同一人物形象。"
+        batch_prompt = batch_storyboard_image_prompt(batch, reference_notes=batch_reference_notes)
         payload = {
             "model": "gpt-image-2-official",
-            "prompt": batch_storyboard_image_prompt(batch, reference_notes=reference_notes),
+            "prompt": batch_prompt,
             "size": size,
             "resolution": resolution,
-            "quality": "medium",
+            "quality": quality,
             "n": len(batch),
         }
-        if reference_urls:
-            payload["image_urls"] = reference_urls
+        if batch_reference_urls:
+            payload["image_urls"] = batch_reference_urls
         remote_task_id = apimart_submit(APIMART_IMAGE_URL, payload, task_id=task_id)
         task_data = apimart_poll(remote_task_id, task_id=task_id, base_progress=loop_start + int((batch_index - 1) / token_span * loop_span), span=max(3, int(60 / token_span)), timeout_seconds=900)
         urls = result_urls(task_data, "images")
@@ -1742,12 +2880,35 @@ def generate_storyboard_images(shots_raw: object, size: str = "9:16", resolution
             raise RuntimeError(f"第 {batch_index} 批分镜图只返回了 {len(urls)} 张，少于请求的 {len(batch)} 张。")
         for (index, shot), url in zip(batch, urls):
             output = download_result_url(url, out_dir / f"shot_{index:02d}.png", task_id=task_id)
+            storage = store_generated_asset(output, "image", task_id=task_id)
             shot.update({
                 "imageUrl": url,
+                "imageStorageUrl": storage.get("url", ""),
+                "imageStoragePath": storage.get("objectKey", ""),
+                "imageStorageError": storage.get("error", ""),
                 "imageTaskId": remote_task_id,
                 "imagePath": str(output),
                 "imageSrc": generation_public_path(output),
+                "imagePrompt": storyboard_image_prompt(shot, index, reference_notes=batch_reference_notes),
             })
+            notify_generation_asset(
+                "生成分镜图完成",
+                payload["prompt"],
+                {
+                    "镜头": shot.get("shot") or index,
+                    "批次": f"{batch_index}/{len(batches)}",
+                    "模型": payload["model"],
+                    "比例": size,
+                    "清晰度": resolution,
+                    "质量": quality,
+                    "参考图数量": len(batch_reference_urls),
+                },
+                storage=storage,
+                source_url=url,
+                local_path=str(output),
+            )
+            if not anchor_url:
+                anchor_url = storage.get("url") or url
     return {
         "shots": shots,
         "count": len(shots),
@@ -1757,13 +2918,111 @@ def generate_storyboard_images(shots_raw: object, size: str = "9:16", resolution
     }
 
 
-def generate_storyboard_videos(shots_raw: object, duration: int = 5, resolution: str = "720p", size: str = "adaptive", task_id: str | None = None) -> dict:
+def normalize_seedance_duration(value: object, fallback: int = 5) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = fallback
+    return max(4, min(15, number))
+
+
+def storyboard_shot_video_duration(shot: dict, fallback: int = 5) -> int:
+    if normalize_bool(shot.get("videoDurationManual"), False):
+        return normalize_seedance_duration(shot.get("videoDuration"), fallback)
+    try:
+        start = float(shot.get("start", 0))
+        end = float(shot.get("end", 0))
+        if end > start:
+            return normalize_seedance_duration(end - start, fallback)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return normalize_seedance_duration(shot.get("videoDuration"), fallback)
+
+
+def normalize_seedance_resolution(value: object, fallback: str = "720p") -> str:
+    text = str(value or fallback).strip()
+    return text if text in {"480p", "720p", "1080p"} else "720p"
+
+
+def normalize_seedance_size(value: object, fallback: str = "adaptive") -> str:
+    text = str(value or fallback).strip()
+    return text if text in {"adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"} else "adaptive"
+
+
+def normalize_bool(value: object, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return fallback
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def normalize_story_video_references(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    refs = []
+    for item in raw[:15]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or "").strip()
+        if kind not in {"image", "video", "audio"}:
+            continue
+        path = str(item.get("path") or "").strip()
+        url = str(item.get("url") or "").strip()
+        storage_url = str(item.get("storageUrl") or item.get("imageStorageUrl") or item.get("videoStorageUrl") or "").strip()
+        storage_path = str(item.get("storagePath") or item.get("imageStoragePath") or item.get("videoStoragePath") or "").strip()
+        src = str(item.get("src") or "").strip()
+        title = str(item.get("title") or "").strip()[:80]
+        if not path and not url and not storage_url:
+            continue
+        refs.append({"type": kind, "path": path, "url": url, "storageUrl": storage_url, "storagePath": storage_path, "src": src, "title": title})
+    return refs
+
+
+def resolve_story_video_reference_urls(refs: list[dict], task_id: str | None = None) -> tuple[list[str], list[str], list[str], list[dict]]:
+    image_urls: list[str] = []
+    video_urls: list[str] = []
+    audio_urls: list[str] = []
+    resolved: list[dict] = []
+    for index, ref in enumerate(refs, start=1):
+        ensure_not_cancelled(task_id)
+        kind = ref.get("type")
+        url = str(ref.get("storageUrl") or ref.get("url") or "").strip()
+        if not str(ref.get("storageUrl") or "").strip():
+            if kind == "image":
+                if task_id:
+                    task_update(task_id, 2, f"正在上传视频参考图到对象存储 {index}")
+                url = upload_reference_asset_url(ref, "image", task_id=task_id)
+            elif kind == "video":
+                if task_id:
+                    task_update(task_id, 2, f"正在上传参考视频到对象存储 {index}")
+                url = upload_reference_asset_url(ref, "video", task_id=task_id)
+            elif kind == "audio":
+                if task_id:
+                    task_update(task_id, 2, f"正在上传参考声音到对象存储 {index}")
+                url = upload_reference_asset_url(ref, "audio", task_id=task_id)
+        next_ref = dict(ref)
+        next_ref["url"] = url
+        resolved.append(next_ref)
+        if kind == "image" and len(image_urls) < 9:
+            image_urls.append(url)
+        elif kind == "video" and len(video_urls) < 3:
+            video_urls.append(url)
+        elif kind == "audio" and len(audio_urls) < 3:
+            audio_urls.append(url)
+    return image_urls, video_urls, audio_urls, resolved
+
+
+def generate_storyboard_videos(shots_raw: object, duration: int = 5, resolution: str = "720p", size: str = "adaptive", generate_audio: bool = True, references_raw: object = None, task_id: str | None = None) -> dict:
     shots = normalize_generation_shots(shots_raw)
     if not shots:
         raise RuntimeError("请先生成分镜脚本，再生成视频片段。")
-    duration = max(4, min(15, int(duration or 5)))
-    resolution = resolution if resolution in {"480p", "720p", "1080p"} else "720p"
-    size = size if size in {"adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"} else "adaptive"
+    duration = normalize_seedance_duration(duration)
+    resolution = normalize_seedance_resolution(resolution)
+    size = normalize_seedance_size(size)
+    generate_audio = normalize_bool(generate_audio, True)
+    video_references = normalize_story_video_references(references_raw)
+    ref_image_urls, ref_video_urls, ref_audio_urls, resolved_references = resolve_story_video_reference_urls(video_references, task_id=task_id) if video_references else ([], [], [], [])
     job = uuid.uuid4().hex[:10]
     out_dir = GENERATIONS / job / "videos"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1772,31 +3031,75 @@ def generate_storyboard_videos(shots_raw: object, duration: int = 5, resolution:
         ensure_not_cancelled(task_id)
         if task_id:
             task_update(task_id, 3 + int((index - 1) / token_span * 94), f"正在提交视频片段 {index}/{len(shots)}")
+        shot_duration = storyboard_shot_video_duration(shot, duration)
+        shot_resolution = normalize_seedance_resolution(shot.get("videoResolution"), resolution)
+        shot_size = normalize_seedance_size(shot.get("videoSize"), size)
+        shot_audio = normalize_bool(shot.get("videoAudio"), generate_audio)
         payload = {
             "model": "doubao-seedance-2.0",
             "prompt": storyboard_video_prompt(shot, index),
-            "resolution": resolution,
-            "duration": duration,
-            "generate_audio": False,
+            "resolution": shot_resolution,
+            "duration": shot_duration,
+            "generate_audio": shot_audio,
         }
-        image_url = str(shot.get("imageUrl") or "").strip()
+        image_urls = []
+        image_url = str(shot.get("imageStorageUrl") or shot.get("imageUrl") or "").strip()
         if image_url:
-            payload["image_urls"] = [image_url]
-            payload["size"] = "adaptive"
+            image_urls.append(image_url)
+        for url in ref_image_urls:
+            if url not in image_urls and len(image_urls) < 9:
+                image_urls.append(url)
+        if image_urls:
+            payload["image_urls"] = image_urls
+            payload["size"] = shot_size
         else:
-            payload["size"] = size if size != "adaptive" else "9:16"
+            payload["size"] = shot_size if shot_size != "adaptive" else "9:16"
+        if ref_video_urls:
+            payload["video_urls"] = ref_video_urls[:3]
+        if ref_audio_urls:
+            if not image_urls and not ref_video_urls:
+                raise RuntimeError("参考声音需要同时提供参考图或参考视频。")
+            payload["audio_urls"] = ref_audio_urls[:3]
         remote_task_id = apimart_submit(APIMART_VIDEO_URL, payload, task_id=task_id)
         task_data = apimart_poll(remote_task_id, task_id=task_id, base_progress=5 + int((index - 1) / token_span * 88), span=max(3, int(70 / token_span)), timeout_seconds=1800)
         urls = result_urls(task_data, "videos")
         if not urls:
             raise RuntimeError(f"第 {index} 个视频片段没有返回视频 URL。")
         output = download_result_url(urls[0], out_dir / f"shot_{index:02d}.mp4", task_id=task_id)
+        storage = store_generated_asset(output, "video", task_id=task_id)
         shot.update({
             "videoUrl": urls[0],
+            "videoStorageUrl": storage.get("url", ""),
+            "videoStoragePath": storage.get("objectKey", ""),
+            "videoStorageError": storage.get("error", ""),
             "videoTaskId": remote_task_id,
             "videoPath": str(output),
             "videoSrc": generation_public_path(output),
+            "videoPrompt": payload["prompt"],
+            "videoDuration": shot_duration,
+            "videoResolution": shot_resolution,
+            "videoSize": shot_size,
+            "videoAudio": shot_audio,
+            "videoReferences": resolved_references,
         })
+        notify_generation_asset(
+            "生成分镜视频完成",
+            payload["prompt"],
+            {
+                "镜头": shot.get("shot") or index,
+                "模型": payload["model"],
+                "时长": f"{shot_duration}秒",
+                "清晰度": shot_resolution,
+                "比例": shot_size,
+                "声音": "是" if shot_audio else "否",
+                "参考图数量": len(image_urls),
+                "参考视频数量": len(ref_video_urls),
+                "参考声音数量": len(ref_audio_urls),
+            },
+            storage=storage,
+            source_url=urls[0],
+            local_path=str(output),
+        )
     return {
         "shots": shots,
         "count": len(shots),
@@ -1889,7 +3192,7 @@ def choose_binary() -> str:
 
 def choose_logo() -> str:
     if is_macos():
-        script = 'POSIX path of (choose file with prompt "选择贴图图片")'
+        script = 'POSIX path of (choose file with prompt "选择贴图图片" of type {"public.image", "png", "jpg", "jpeg", "webp", "bmp", "gif", "heic", "heif"})'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
             raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
@@ -1899,12 +3202,32 @@ def choose_logo() -> str:
 
 def choose_reference_image() -> str:
     if is_macos():
-        script = 'POSIX path of (choose file with prompt "选择分镜参考图")'
+        script = 'POSIX path of (choose file with prompt "选择分镜参考图" of type {"public.image", "png", "jpg", "jpeg", "webp", "bmp", "gif", "heic", "heif"})'
         result = run(["osascript", "-e", script], timeout=120)
         if result.returncode != 0:
             raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
         return safe_text(result.stdout).strip()
     return choose_with_tkinter(kind="logo")
+
+
+def choose_reference_video() -> str:
+    if is_macos():
+        script = 'POSIX path of (choose file with prompt "选择视频参考素材" of type {"public.movie", "mp4", "mov", "m4v", "webm", "mkv"})'
+        result = run(["osascript", "-e", script], timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
+    return choose_with_tkinter(kind="file")
+
+
+def choose_reference_audio() -> str:
+    if is_macos():
+        script = 'POSIX path of (choose file with prompt "选择声音参考素材" of type {"public.audio", "mp3", "wav", "m4a", "aac", "flac"})'
+        result = run(["osascript", "-e", script], timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(safe_text(result.stderr).strip() or "已取消选择。")
+        return safe_text(result.stdout).strip()
+    return choose_with_tkinter(kind="bgm")
 
 
 def choose_bgm() -> str:
@@ -2135,7 +3458,7 @@ def export_with_ffmpeg(input_path: Path, output_path: Path, clips: list[dict]) -
             str(output_path),
         ], timeout=None)
         if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout)[-1500:])
+            raise RuntimeError(result_tail(result, 1500))
         return
 
     errors = []
@@ -2174,7 +3497,7 @@ def export_with_ffmpeg(input_path: Path, output_path: Path, clips: list[dict]) -
         result = run(command, timeout=None)
         if result.returncode == 0:
             return
-        errors.append((result.stderr or result.stdout)[-1500:])
+        errors.append(result_tail(result, 1500))
 
     raise RuntimeError(errors[-1] if errors else "导出失败。")
 
@@ -2209,6 +3532,15 @@ def has_audio_stream(video: Path) -> bool:
 def media_duration_seconds(video: Path) -> float:
     result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
     return parse_duration_seconds(result.stderr)
+
+
+def media_pixel_size(video: Path) -> tuple[int, int]:
+    result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
+    info = parse_media_info(result.stderr)
+    match = re.search(r"(\d+)x(\d+)", str(info.get("resolution") or ""))
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return 1080, 1920
 
 
 def output_name_for(video: Path, suffix: str, output_dir: Path) -> Path:
@@ -2488,7 +3820,7 @@ def export_packaged_video(input_path: Path, output_path: Path, clips: list[dict]
         except Exception:
             pass
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout)[-1600:])
+        raise RuntimeError(result_tail(result, 1600))
 
 
 def export_clip_segments(input_path: Path, output_dir: Path, clips: list[dict]) -> list[dict]:
@@ -2510,6 +3842,82 @@ def export_clip_segments(input_path: Path, output_dir: Path, clips: list[dict]) 
     return exported
 
 
+def generated_storyboard_videos(shots_raw: object) -> list[tuple[int, Path]]:
+    shots = normalize_generation_shots(shots_raw)
+    videos: list[tuple[int, Path]] = []
+    for index, shot in enumerate(shots, start=1):
+        path = Path(str(shot.get("videoPath") or "")).expanduser()
+        if path.exists() and path.is_file():
+            videos.append((index, path))
+    if not videos:
+        raise RuntimeError("还没有可导出的分镜视频，请先在镜头里生成视频片段。")
+    return videos
+
+
+def export_storyboard_video_files(video: Path, output_dir: Path, shots_raw: object) -> list[dict]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    exported = []
+    for index, source in generated_storyboard_videos(shots_raw):
+        output = output_name_for(video, f"story_{index}", output_dir)
+        shutil.copy2(source, output)
+        exported.append({
+            "path": str(output),
+            "source": str(source),
+            "shot": index,
+        })
+    return exported
+
+
+def merge_storyboard_video_files(video: Path, output_dir: Path, shots_raw: object) -> Path:
+    videos = generated_storyboard_videos(shots_raw)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_name_for(video, "story_final", output_dir)
+    target_width, target_height = media_pixel_size(videos[0][1])
+    target_width = max(2, target_width // 2 * 2)
+    target_height = max(2, target_height // 2 * 2)
+
+    command = [ffmpeg_path(), "-hide_banner", "-y"]
+    for _, source in videos:
+        command.extend(["-i", str(source)])
+
+    audio_inputs: list[tuple[int, str]] = []
+    next_input = len(videos)
+    for index, (_, source) in enumerate(videos):
+        if has_audio_stream(source):
+            audio_inputs.append((index, f"[{index}:a:0]asetpts=PTS-STARTPTS,aresample=48000[a{index}]"))
+            continue
+        duration = max(0.1, media_duration_seconds(source))
+        command.extend(["-f", "lavfi", "-t", f"{duration:.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
+        audio_inputs.append((index, f"[{next_input}:a]asetpts=PTS-STARTPTS[a{index}]"))
+        next_input += 1
+
+    filters = []
+    concat_parts = []
+    for index in range(len(videos)):
+        filters.append(
+            f"[{index}:v:0]setpts=PTS-STARTPTS,"
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{index}]"
+        )
+        concat_parts.append(f"[v{index}][a{index}]")
+    filters.extend(filter_text for _, filter_text in audio_inputs)
+    filters.append(f"{''.join(concat_parts)}concat=n={len(videos)}:v=1:a=1[v][a]")
+
+    command.extend([
+        "-filter_complex", ";".join(filters),
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        str(output),
+    ])
+    result = run(command, timeout=None)
+    if result.returncode != 0:
+        raise RuntimeError(result_tail(result, 1600))
+    return output
+
+
 def preview_clip(input_path: Path, clip: dict) -> dict:
     start = max(0.0, float(clip.get("start", 0)))
     duration = min(90.0, max(0.1, float(clip.get("duration", 0))))
@@ -2527,7 +3935,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
-        if path == "/":
+        if path in {"/", "/auth/callback"}:
             self.send_static(STATIC / "index.html", "text/html; charset=utf-8")
             return
         if path.startswith("/static/"):
@@ -2549,6 +3957,25 @@ class Handler(BaseHTTPRequestHandler):
             content_type = "video/mp4" if file_path.suffix.lower() == ".mp4" else "image/png"
             self.send_static(file_path, content_type)
             return
+        if path == "/local-image":
+            query = parse_qs(parsed.query)
+            image_path = Path(query.get("path", [""])[0]).expanduser()
+            content_types = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+                ".gif": "image/gif",
+                ".bmp": "image/bmp",
+                ".heic": "image/heic",
+                ".heif": "image/heif",
+            }
+            content_type = content_types.get(image_path.suffix.lower())
+            if not content_type:
+                response(self, 400, {"error": "不支持预览该图片格式。"})
+                return
+            self.send_static(image_path, content_type)
+            return
         if path.startswith("/api/task/"):
             task_id = path.removeprefix("/api/task/")
             with TASK_LOCK:
@@ -2562,6 +3989,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             response(self, 200, public_config())
             return
+        if path == "/api/auth/status":
+            response(self, 200, auth_state())
+            return
+        if path == "/api/auth/qr":
+            response(self, 200, {
+                "url": WECOM_QR_CONNECT_URL,
+                "appid": WECOM_APPID,
+                "agentid": WECOM_AGENTID,
+                "redirectUri": WECOM_REDIRECT_URI,
+                "state": WECOM_STATE,
+            })
+            return
         if path == "/api/history":
             response(self, 200, {"items": load_history()[:30]})
             return
@@ -2571,6 +4010,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
+
+            if self.path == "/api/auth/login":
+                payload = read_json(self)
+                state = login_with_wecom_code(payload.get("code") or payload.get("url"))
+                response(self, 200, state)
+                return
+
+            if self.path == "/api/auth/logout":
+                with AUTH_LOCK:
+                    WECOM_SESSION.clear()
+                response(self, 200, auth_state())
+                return
 
             if path.startswith("/api/task/") and path.endswith("/cancel"):
                 task_id = path.removeprefix("/api/task/").removesuffix("/cancel").strip("/")
@@ -2607,7 +4058,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/api/pick-reference-image":
-                response(self, 200, {"path": choose_reference_image()})
+                picked = choose_reference_image()
+                response(self, 200, {"path": picked, "src": f"/local-image?path={quote(picked)}"})
+                return
+
+            if self.path == "/api/pick-reference-video":
+                response(self, 200, {"path": choose_reference_video()})
+                return
+
+            if self.path == "/api/pick-reference-audio":
+                response(self, 200, {"path": choose_reference_audio()})
                 return
 
             if self.path == "/api/pick-bgm":
@@ -2622,38 +4082,32 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/config":
                 payload = read_json(self)
                 config = load_config()
-                if "arkApiKey" in payload:
-                    value = str(payload.get("arkApiKey", "")).strip()
-                    if value:
-                        config["arkApiKey"] = value
-                if "apimartApiKey" in payload:
-                    value = str(payload.get("apimartApiKey", "")).strip()
-                    if value:
-                        config["apimartApiKey"] = value
                 if "apimartImageSize" in payload:
                     config["apimartImageSize"] = str(payload.get("apimartImageSize", "9:16")).strip() or "9:16"
                 if "apimartImageResolution" in payload:
                     config["apimartImageResolution"] = str(payload.get("apimartImageResolution", "1k")).strip() or "1k"
                 if "seedanceDuration" in payload:
                     try:
-                        config["seedanceDuration"] = max(4, min(15, int(payload.get("seedanceDuration", 5))))
+                        config["seedanceDuration"] = normalize_seedance_duration(payload.get("seedanceDuration", 5))
                     except (TypeError, ValueError):
                         config["seedanceDuration"] = 5
                 if "seedanceResolution" in payload:
-                    config["seedanceResolution"] = str(payload.get("seedanceResolution", "720p")).strip() or "720p"
+                    config["seedanceResolution"] = normalize_seedance_resolution(payload.get("seedanceResolution", "720p"))
+                if "seedanceSize" in payload:
+                    config["seedanceSize"] = normalize_seedance_size(payload.get("seedanceSize", "adaptive"))
+                if "seedanceAudio" in payload:
+                    config["seedanceAudio"] = normalize_bool(payload.get("seedanceAudio"), True)
                 if "ffmpegPath" in payload:
                     config["ffmpegPath"] = str(payload.get("ffmpegPath", "")).strip()
-                if "wecomWebhookUrl" in payload:
-                    config["wecomWebhookUrl"] = str(payload.get("wecomWebhookUrl", "")).strip()
-                if "usageLogName" in payload:
-                    config["usageLogName"] = str(payload.get("usageLogName", "")).strip()
-                if "usageLogDept" in payload:
-                    config["usageLogDept"] = str(payload.get("usageLogDept", "")).strip()
                 if "downloadRetentionDays" in payload:
                     try:
                         config["downloadRetentionDays"] = max(0, int(payload.get("downloadRetentionDays", 30)))
                     except (TypeError, ValueError):
                         config["downloadRetentionDays"] = 30
+                if "douyinCookie" in payload:
+                    douyin_cookie = str(payload.get("douyinCookie") or "").strip()
+                    if douyin_cookie:
+                        config["douyinCookie"] = douyin_cookie[:12000]
                 if "packageTemplate" in payload:
                     config["packageTemplate"] = str(payload.get("packageTemplate", "")).strip()
                 if "packageTemplates" in payload:
@@ -2787,15 +4241,72 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/storyboard-images":
                 payload = read_json(self)
                 shots = payload.get("shots", [])
+                all_shots = payload.get("allShots", [])
+                shot_index = payload.get("index")
                 references = payload.get("references", [])
                 reference_description = str(payload.get("referenceDescription", "")).strip()[:1200]
                 config = load_config()
                 size = str(payload.get("size") or config.get("apimartImageSize") or "9:16")
                 resolution = str(payload.get("resolution") or config.get("apimartImageResolution") or "1k")
-                notify_feature_used("生成分镜图", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，参考图：{len(references) if isinstance(references, list) else 0}，比例：{size}，清晰度：{resolution}")
+                quality = normalize_image_quality(payload.get("quality") or config.get("apimartImageQuality") or "medium")
+                notify_feature_used("生成分镜图", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，参考图：{len(references) if isinstance(references, list) else 0}，比例：{size}，清晰度：{resolution}，质量：{quality}")
                 def worker(tid: str) -> dict:
-                    return generate_storyboard_images(shots, size=size, resolution=resolution, references_raw=references, reference_description=reference_description, task_id=tid)
+                    result = generate_storyboard_images(shots, size=size, resolution=resolution, quality=quality, references_raw=references, reference_description=reference_description, task_id=tid)
+                    try:
+                        index_value = int(shot_index) if shot_index is not None else None
+                    except (TypeError, ValueError):
+                        index_value = None
+                    storyboard_history = storyboard_history_with_generated(all_shots, result.get("shots", []) if isinstance(result.get("shots"), list) else [], index=index_value)
+                    append_history("生成分镜图", None, summary=result.get("summary", ""), storyboard=storyboard_history, references=result.get("references", [])[:16])
+                    return result
                 task_id = start_task("生成分镜图", worker)
+                response(self, 200, {"taskId": task_id})
+                return
+
+            if self.path == "/api/storyboard-reference-images":
+                payload = read_json(self)
+                shots = payload.get("shots", [])
+                existing_count = int(payload.get("existingCount") or 0)
+                existing_references = normalize_reference_images(payload.get("existingReferences", []))
+                size = str(payload.get("size") or "9:16")
+                resolution = str(payload.get("resolution") or "1k")
+                quality = normalize_image_quality(payload.get("quality") or "medium")
+                notify_feature_used("AI生成参考图", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，比例：{size}，清晰度：{resolution}，质量：{quality}")
+                def worker(tid: str) -> dict:
+                    result = generate_storyboard_reference_images(shots, size=size, resolution=resolution, quality=quality, existing_count=existing_count, task_id=tid)
+                    history_refs = (existing_references + (result.get("references", []) if isinstance(result.get("references"), list) else []))[:16]
+                    append_history("AI生成参考图", None, summary=result.get("summary", ""), references=history_refs, storyboard=shots[:24] if isinstance(shots, list) else [])
+                    return result
+                task_id = start_task("AI生成参考图", worker)
+                response(self, 200, {"taskId": task_id})
+                return
+
+            if self.path == "/api/storyboard-reference-image":
+                payload = read_json(self)
+                prompt = str(payload.get("prompt") or "").strip()[:1600]
+                title = str(payload.get("title") or "AI参考图").strip()[:80]
+                index = int(payload.get("index") or 0) + 1
+                existing_references = normalize_reference_images(payload.get("existingReferences", []))
+                size = str(payload.get("size") or "9:16")
+                resolution = str(payload.get("resolution") or "1k")
+                quality = normalize_image_quality(payload.get("quality") or "medium")
+                if not prompt:
+                    response(self, 400, {"error": "请先填写参考图提示词。"})
+                    return
+                notify_feature_used("重新生成参考图", f"标题：{title}，比例：{size}，清晰度：{resolution}，质量：{quality}")
+                def worker(tid: str) -> dict:
+                    ref = generate_reference_image_from_prompt(prompt, title=title, size=size, resolution=resolution, quality=quality, index=index, task_id=tid)
+                    history_refs = list(existing_references)
+                    if 0 <= index - 1 < len(history_refs):
+                        history_refs[index - 1] = ref
+                    else:
+                        history_refs.append(ref)
+                    append_history("重新生成参考图", None, summary=f"{title} 已重新生成。", references=history_refs[:16])
+                    return {
+                        "reference": ref,
+                        "summary": f"{title} 已重新生成。",
+                    }
+                task_id = start_task("重新生成参考图", worker)
                 response(self, 200, {"taskId": task_id})
                 return
 
@@ -2805,12 +4316,85 @@ class Handler(BaseHTTPRequestHandler):
                 config = load_config()
                 duration = int(payload.get("duration") or config.get("seedanceDuration") or 5)
                 resolution = str(payload.get("resolution") or config.get("seedanceResolution") or "720p")
-                size = str(payload.get("size") or config.get("apimartImageSize") or "9:16")
-                notify_feature_used("生成视频片段", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，时长：{duration} 秒，清晰度：{resolution}")
+                size = str(payload.get("size") or config.get("seedanceSize") or "adaptive")
+                references = payload.get("references", [])
+                generate_audio = normalize_bool(payload.get("generateAudio"), bool(config.get("seedanceAudio", True)))
+                notify_feature_used("生成视频片段", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，时长：{duration} 秒，清晰度：{resolution}，比例：{size}，声音：{'是' if generate_audio else '否'}")
                 def worker(tid: str) -> dict:
-                    return generate_storyboard_videos(shots, duration=duration, resolution=resolution, size=size, task_id=tid)
+                    result = generate_storyboard_videos(shots, duration=duration, resolution=resolution, size=size, generate_audio=generate_audio, references_raw=references, task_id=tid)
+                    append_history("生成视频片段", None, summary=result.get("summary", ""), storyboard=result.get("shots", [])[:24], videoReferences=normalize_story_video_references(references)[:15], outputDir=result.get("outputDir", ""))
+                    return result
                 task_id = start_task("生成视频片段", worker)
                 response(self, 200, {"taskId": task_id})
+                return
+
+            if self.path == "/api/storyboard-video":
+                payload = read_json(self)
+                shot = payload.get("shot", {})
+                all_shots = payload.get("allShots", [])
+                index = int(payload.get("index", 0)) + 1
+                config = load_config()
+                if not isinstance(shot, dict):
+                    response(self, 400, {"error": "请选择有效的分镜镜头。"})
+                    return
+                fallback_duration = storyboard_shot_video_duration(shot, normalize_seedance_duration(config.get("seedanceDuration") or 5))
+                duration_value = payload.get("videoDuration") if "videoDuration" in payload else payload.get("duration")
+                duration = normalize_seedance_duration(duration_value, fallback_duration) if normalize_bool(shot.get("videoDurationManual"), False) else fallback_duration
+                resolution = normalize_seedance_resolution(payload.get("videoResolution") or payload.get("resolution") or config.get("seedanceResolution") or "720p")
+                size = normalize_seedance_size(payload.get("videoSize") or payload.get("size") or config.get("seedanceSize") or "adaptive")
+                references = payload.get("references", [])
+                generate_audio = normalize_bool(payload.get("videoAudio") if "videoAudio" in payload else payload.get("generateAudio"), bool(config.get("seedanceAudio", True)))
+                notify_feature_used("生成单个分镜视频", f"镜头：{index}，时长：{duration} 秒，清晰度：{resolution}，比例：{size}，声音：{'是' if generate_audio else '否'}")
+                def worker(tid: str) -> dict:
+                    current = dict(shot)
+                    current.update({
+                        "videoDuration": duration,
+                        "videoResolution": resolution,
+                        "videoSize": size,
+                        "videoAudio": generate_audio,
+                    })
+                    result = generate_storyboard_videos([current], duration=duration, resolution=resolution, size=size, generate_audio=generate_audio, references_raw=references, task_id=tid)
+                    generated = (result.get("shots") or [current])[0]
+                    storyboard_history = storyboard_history_with_generated(all_shots, [generated], index=index - 1)
+                    append_history("生成单个分镜视频", None, summary=f"镜头 {index} 视频片段已生成。", storyboard=storyboard_history, videoReferences=normalize_story_video_references(references)[:15], outputDir=result.get("outputDir", ""))
+                    return {
+                        "shot": generated,
+                        "summary": f"镜头 {index} 视频片段已生成。",
+                        "outputDir": result.get("outputDir", ""),
+                    }
+                task_id = start_task("生成单个分镜视频", worker)
+                response(self, 200, {"taskId": task_id})
+                return
+
+            if self.path == "/api/storyboard-export-videos":
+                payload = read_json(self)
+                video = Path(payload.get("path", "")).expanduser()
+                output_dir = Path(payload.get("outputDir") or str(EXPORTS)).expanduser()
+                shots = payload.get("shots", [])
+                if not video.exists():
+                    response(self, 400, {"error": "视频文件不存在。"})
+                    return
+                output_dir.mkdir(parents=True, exist_ok=True)
+                exported = export_storyboard_video_files(video, output_dir, shots)
+                reveal_in_finder(Path(exported[0]["path"]))
+                notify_feature_used("导出分镜视频", f"视频：{video.name}，数量：{len(exported)}")
+                append_history("导出分镜视频", video, summary=f"导出 {len(exported)} 个分镜视频", outputDir=str(output_dir), segments=exported[:12])
+                response(self, 200, {"segments": exported, "count": len(exported), "outputDir": str(output_dir)})
+                return
+
+            if self.path == "/api/storyboard-merge-videos":
+                payload = read_json(self)
+                video = Path(payload.get("path", "")).expanduser()
+                output_dir = Path(payload.get("outputDir") or str(EXPORTS)).expanduser()
+                shots = payload.get("shots", [])
+                if not video.exists():
+                    response(self, 400, {"error": "视频文件不存在。"})
+                    return
+                output = merge_storyboard_video_files(video, output_dir, shots)
+                reveal_in_finder(output)
+                notify_feature_used("合并分镜视频", f"视频：{video.name}，镜头数：{len(generated_storyboard_videos(shots))}")
+                append_history("合并分镜视频", video, summary="按分镜顺序合并视频片段", output=str(output))
+                response(self, 200, {"path": str(output), "outputDir": str(output_dir)})
                 return
 
             if self.path == "/api/preview":

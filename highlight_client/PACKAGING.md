@@ -5,7 +5,7 @@
 - macOS: `.app` / `.dmg`
 - Windows: `.exe` / `.msi`
 - ffmpeg: 建议随安装包内置，或首次启动时引导用户选择路径。
-- API Key: 不写入代码。用户在“设置”里填写，保存到本机 `user_config.json`。
+- API Key: 当前版本由服务端默认配置统一提供，用户不需要在设置中填写。
 
 ## 一键构建脚本
 
@@ -36,6 +36,53 @@ scripts\build_app_windows.bat
 ```
 
 也可以把项目推到 GitHub 后手动触发 `.github/workflows/build-windows.yml`，构建产物会作为 `windows-bundles` artifact 上传。
+
+## 自动更新
+
+当前已接入 Tauri Updater，更新地址为 GitHub Releases 的：
+
+```text
+https://github.com/xuloong/ai-slicer/releases/latest/download/latest.json
+```
+
+发布流程：
+
+1. 保存 updater 私钥。当前生成的私钥临时放在 `/private/tmp/ai-short-video-updater.key`，请把文件内容保存到 GitHub Secrets:
+   - `TAURI_SIGNING_PRIVATE_KEY`
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 留空即可，除非后续重新生成带密码的私钥。
+2. 修改版本号，保持以下三个位置一致：
+   - `highlight_client/package.json`
+   - `highlight_client/package-lock.json`
+   - `highlight_client/src-tauri/tauri.conf.json`
+3. 推送 tag，例如：
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+4. GitHub Actions 会运行 `.github/workflows/release-tauri.yml`，生成 macOS / Windows 安装包、更新包签名和 `latest.json`。
+5. 已安装客户端启动后会自动检查一次更新；用户也可以在“设置”里点击“检查更新”。
+
+注意：Tauri 更新包必须签名校验。私钥丢失后，已经安装的旧客户端将无法升级到后续版本，需要重新分发完整安装包。
+
+## AI 生成素材日志和对象存储
+
+调用 GPT-Image-2 / Seedance2.0 生成图片或视频后，程序会把提示词、模型参数、生成平台链接、本地路径写入企业微信使用日志。
+
+生成图片和视频会默认同步上传到火山引擎对象存储。当前项目已内置默认 TOS 配置，如需在不同环境覆盖，请配置以下变量：
+
+```bash
+TOS_ENDPOINT=https://tos-cn-shanghai.volces.com
+TOS_REGION=cn-shanghai
+TOS_BUCKET=aivideo-topsky
+TOS_ACCESS_KEY_ID=your-access-key-id
+TOS_SECRET_ACCESS_KEY=your-secret-access-key
+TOS_PUBLIC_BASE_URL=https://aivideo-topsky.tos-cn-shanghai.volces.com
+TOS_OBJECT_PREFIX=ai-short-video-generations
+```
+
+`TOS_PUBLIC_BASE_URL` 可选；如果配置了自定义 CDN / 公开访问域名，日志会记录这个域名下的素材链接。对象存储上传失败时，生成流程不会中断，日志仍会记录 AI 平台返回链接和本地路径。
 
 ## macOS 图标、签名和“已损坏”提示
 
@@ -83,7 +130,7 @@ npm run build
 
 1. 把 macOS / Windows 对应的 ffmpeg 二进制放进 bundle resources，或在首次启动时引导用户选择路径。
 2. 如需 macOS 本地 OCR 的完整体验，需要把 OCR 能力改成独立原生 helper，避免依赖用户安装 Xcode Command Line Tools。
-3. 配置文件已写到用户配置目录；页面“设置”用于填写 API Key 和 ffmpeg 路径。
+3. 配置文件已写到用户配置目录；页面“设置”用于填写 ffmpeg 路径、下载保留时间和一键成片模板。
 
 ## 轻量分发
 
