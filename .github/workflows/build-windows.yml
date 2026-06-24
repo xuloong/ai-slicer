@@ -27,6 +27,12 @@ jobs:
         run: npm install
       - name: Build sidecar
         run: python scripts\\build_sidecar.py
+      - name: Disable updater artifact signing for installer artifact
+        shell: pwsh
+        run: |
+          $config = Get-Content src-tauri/tauri.conf.json -Raw
+          $config = $config -replace '"createUpdaterArtifacts": true', '"createUpdaterArtifacts": false'
+          Set-Content src-tauri/tauri.conf.json $config
       - name: Build Tauri app
         run: npm run build -- --bundles nsis
         env:
