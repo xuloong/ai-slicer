@@ -82,7 +82,7 @@ GENERATIONS = DATA_DIR / "generations"
 CONFIG_FILE = DATA_DIR / "user_config.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 ARK_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-ARK_MODEL = "doubao-seed-2-0-pro-260215"
+ARK_MODEL = "doubao-seed-2-1-turbo"
 APIMART_IMAGE_URL = "https://api.apimart.ai/v1/images/generations"
 APIMART_VIDEO_URL = "https://api.apimart.ai/v1/videos/generations"
 APIMART_TASK_URL = "https://api.apimart.ai/v1/tasks"
@@ -286,7 +286,7 @@ def public_config() -> dict:
         "apimartApiKeyMasked": f"{apimart_key[:8]}...{apimart_key[-4:]}" if len(apimart_key) > 16 else "",
         "hasDouyinCookie": bool(douyin_cookie),
         "douyinCookieMasked": f"已配置，长度 {len(douyin_cookie)}" if douyin_cookie else "",
-        "apimartImageSize": config.get("apimartImageSize", "9:16"),
+        "apimartImageSize": config.get("apimartImageSize", "auto"),
         "apimartImageResolution": config.get("apimartImageResolution", "1k"),
         "apimartImageQuality": config.get("apimartImageQuality", "medium"),
         "seedanceDuration": config.get("seedanceDuration", 5),
@@ -2164,7 +2164,7 @@ def analyze_ai_highlights(
             content.append({"type": "image_url", "image_url": {"url": data_url}})
 
     if task_id:
-        task_update(task_id, 94, "正在调用豆包 Seed 2.0 Pro")
+        task_update(task_id, 94, "正在调用豆包 Seed 2.1 Turbo")
     ai_text = call_ark_chat(content, task_id=task_id)
     if task_id:
         task_update(task_id, 98, "正在解析 AI 返回结果")
@@ -2521,6 +2521,8 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
 def storyboard_image_prompt(shot: dict, index: int, reference_notes: str = "") -> str:
     parts = [
         "请生成一张适合短视频广告分镜的高清画面，真实商业摄影质感，主体清晰，构图干净，可直接作为视频首帧。",
+        "重要：这张图必须是单一镜头、单一完整画面、单张竖屏短视频首帧构图。禁止生成上下分屏、左右分屏、漫画格、多宫格、拼接图、前后对比图或一张图里包含多个分镜画面。",
+        "如果一个镜头里有多个动作，只表现最关键的一个瞬间；不要把连续动作拆成多格放在同一张图里。",
         "必须保持核心人物一致：同一张脸、同一发型、同一服装轮廓、同一年龄气质、同一肤色和体型；不同镜头只改变姿态、表情、景别和机位。",
         "如果提供了参考图，请优先保持参考图中的人物脸型、五官比例、发型、服装、商品外观、场景空间和整体风格一致；不要随意更换核心人物或场景设定。",
         f"镜头{shot.get('shot') or index}",
@@ -2539,6 +2541,7 @@ def storyboard_image_prompt(shot: dict, index: int, reference_notes: str = "") -
 def storyboard_video_prompt(shot: dict, index: int) -> str:
     parts = [
         "根据分镜生成自然流畅的短视频片段，真实广告片质感，动作连贯，镜头稳定，不要出现变形文字和错误字幕。",
+        "如果提供首帧参考图，请把它理解为单一竖屏视频画面的首帧来延展，不要生成分屏、拼图、漫画格或多个画面同时出现的效果。",
         f"镜头{shot.get('shot') or index}",
         f"画面：{shot.get('scene') or ''}",
         f"动作：{shot.get('action') or ''}",
@@ -2656,6 +2659,8 @@ def upload_reference_images(refs: list[dict], task_id: str | None = None) -> lis
 def batch_storyboard_image_prompt(batch: list[tuple[int, dict]], reference_notes: str = "") -> str:
     lines = [
         f"请一次生成 {len(batch)} 张短视频分镜图，按下面镜头顺序一一对应输出。每张图都是独立分镜，但人物、商品、场景和整体视觉风格必须保持一致。",
+        "重要：每个返回结果都必须是一张单一镜头的完整画面、单张竖屏短视频首帧构图。禁止生成上下分屏、左右分屏、漫画格、多宫格、拼接图、前后对比图，也不要在一张图里包含多个分镜画面。",
+        "不要把多个镜头合并到同一张图中；每个镜头对应 API 返回的一张独立图片。如果某个镜头包含连续动作，只表现最适合作为视频首帧的一个关键瞬间。",
         "每张图只能表现对应镜头的画面内容、动作和场景，不要把其他镜头的动作、道具、字幕或场景混入当前镜头。",
         "先在内部建立统一角色设定：同一人物在所有图中必须保持同一张脸、五官比例、发型、服装轮廓、年龄气质、肤色和体型。不要把同一角色画成不同人。",
         "如果参考图说明中包含人物、商品或场景，请把它们作为全片视觉锚点；若包含上一批生成图，请严格延续上一批中的人物形象和画面风格。",
@@ -2750,8 +2755,8 @@ def generate_reference_prompt_items(shots: list[dict], task_id: str | None = Non
     return refs or fallback_reference_prompts(shots)
 
 
-def generate_reference_image_from_prompt(prompt: str, title: str = "AI参考图", size: str = "9:16", resolution: str = "1k", quality: str = "medium", out_dir: Path | None = None, index: int = 1, task_id: str | None = None) -> dict:
-    size = size if size in {"auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "16:9", "9:16", "21:9"} or re.match(r"^\d+x\d+$", size or "") else "9:16"
+def generate_reference_image_from_prompt(prompt: str, title: str = "AI参考图", size: str = "auto", resolution: str = "1k", quality: str = "medium", out_dir: Path | None = None, index: int = 1, task_id: str | None = None) -> dict:
+    size = size if size in {"auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "16:9", "9:16", "21:9"} or re.match(r"^\d+x\d+$", size or "") else "auto"
     resolution = resolution if resolution in {"1k", "2k", "4k"} else "1k"
     quality = normalize_image_quality(quality)
     out_dir = out_dir or (GENERATIONS / f"refs_{uuid.uuid4().hex[:10]}")
@@ -2798,7 +2803,7 @@ def generate_reference_image_from_prompt(prompt: str, title: str = "AI参考图"
     }
 
 
-def generate_storyboard_reference_images(shots_raw: object, size: str = "9:16", resolution: str = "1k", quality: str = "medium", existing_count: int = 0, task_id: str | None = None) -> dict:
+def generate_storyboard_reference_images(shots_raw: object, size: str = "auto", resolution: str = "1k", quality: str = "medium", existing_count: int = 0, task_id: str | None = None) -> dict:
     shots = normalize_generation_shots(shots_raw)
     if not shots:
         raise RuntimeError("请先生成分镜脚本，再生成 AI 参考图。")
@@ -2835,11 +2840,11 @@ def normalize_image_quality(value: object) -> str:
     return text if text in {"auto", "low", "medium", "high"} else "medium"
 
 
-def generate_storyboard_images(shots_raw: object, size: str = "9:16", resolution: str = "1k", quality: str = "medium", references_raw: object = None, reference_description: str = "", task_id: str | None = None) -> dict:
+def generate_storyboard_images(shots_raw: object, size: str = "auto", resolution: str = "1k", quality: str = "medium", references_raw: object = None, reference_description: str = "", task_id: str | None = None) -> dict:
     shots = normalize_generation_shots(shots_raw)
     if not shots:
         raise RuntimeError("请先生成分镜脚本，再生成分镜图。")
-    size = size if size in {"auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "16:9", "9:16", "21:9"} or re.match(r"^\d+x\d+$", size or "") else "9:16"
+    size = size if size in {"auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "16:9", "9:16", "21:9"} or re.match(r"^\d+x\d+$", size or "") else "auto"
     resolution = resolution if resolution in {"1k", "2k", "4k"} else "1k"
     quality = normalize_image_quality(quality)
     references = normalize_reference_images(references_raw)
@@ -4083,7 +4088,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = read_json(self)
                 config = load_config()
                 if "apimartImageSize" in payload:
-                    config["apimartImageSize"] = str(payload.get("apimartImageSize", "9:16")).strip() or "9:16"
+                    config["apimartImageSize"] = str(payload.get("apimartImageSize", "auto")).strip() or "auto"
                 if "apimartImageResolution" in payload:
                     config["apimartImageResolution"] = str(payload.get("apimartImageResolution", "1k")).strip() or "1k"
                 if "seedanceDuration" in payload:
@@ -4246,7 +4251,7 @@ class Handler(BaseHTTPRequestHandler):
                 references = payload.get("references", [])
                 reference_description = str(payload.get("referenceDescription", "")).strip()[:1200]
                 config = load_config()
-                size = str(payload.get("size") or config.get("apimartImageSize") or "9:16")
+                size = str(payload.get("size") or config.get("apimartImageSize") or "auto")
                 resolution = str(payload.get("resolution") or config.get("apimartImageResolution") or "1k")
                 quality = normalize_image_quality(payload.get("quality") or config.get("apimartImageQuality") or "medium")
                 notify_feature_used("生成分镜图", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，参考图：{len(references) if isinstance(references, list) else 0}，比例：{size}，清晰度：{resolution}，质量：{quality}")
@@ -4268,7 +4273,7 @@ class Handler(BaseHTTPRequestHandler):
                 shots = payload.get("shots", [])
                 existing_count = int(payload.get("existingCount") or 0)
                 existing_references = normalize_reference_images(payload.get("existingReferences", []))
-                size = str(payload.get("size") or "9:16")
+                size = str(payload.get("size") or "auto")
                 resolution = str(payload.get("resolution") or "1k")
                 quality = normalize_image_quality(payload.get("quality") or "medium")
                 notify_feature_used("AI生成参考图", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，比例：{size}，清晰度：{resolution}，质量：{quality}")
@@ -4287,7 +4292,7 @@ class Handler(BaseHTTPRequestHandler):
                 title = str(payload.get("title") or "AI参考图").strip()[:80]
                 index = int(payload.get("index") or 0) + 1
                 existing_references = normalize_reference_images(payload.get("existingReferences", []))
-                size = str(payload.get("size") or "9:16")
+                size = str(payload.get("size") or "auto")
                 resolution = str(payload.get("resolution") or "1k")
                 quality = normalize_image_quality(payload.get("quality") or "medium")
                 if not prompt:

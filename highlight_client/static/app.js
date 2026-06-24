@@ -1223,7 +1223,7 @@ async function loadConfig() {
       douyinCookie.value = "";
       douyinCookie.placeholder = data.hasDouyinCookie ? `${data.douyinCookieMasked || "已配置抖音 Cookie"}；如需更新请重新粘贴` : "抖音下载失败时粘贴浏览器请求里的 Cookie";
     }
-    apimartImageSize.value = data.apimartImageSize || "9:16";
+    apimartImageSize.value = data.apimartImageSize || "auto";
     apimartImageResolution.value = data.apimartImageResolution || "1k";
     apimartImageQuality.value = normalizeImageQuality(data.apimartImageQuality || "medium");
     seedanceDuration.value = String(normalizeStoryVideoDuration(data.seedanceDuration ?? 5));
@@ -1485,7 +1485,7 @@ $("generateStoryboardRefsBtn").addEventListener("click", async () => {
       shots: storyboardPayload(),
       existingCount: storyboardRefs.length,
       existingReferences: storyboardRefs,
-      size: apimartImageSize.value || "9:16",
+      size: apimartImageSize.value || "auto",
       resolution: apimartImageResolution.value || "1k",
       quality: normalizeImageQuality(apimartImageQuality.value),
     }, (data) => {
@@ -1514,7 +1514,7 @@ async function regenerateStoryboardReference(index) {
       title: ref.title || `参考图 ${index + 1}`,
       index,
       existingReferences: storyboardRefs,
-      size: apimartImageSize.value || "9:16",
+      size: apimartImageSize.value || "auto",
       resolution: apimartImageResolution.value || "1k",
       quality: normalizeImageQuality(apimartImageQuality.value),
     }, (data) => {
@@ -1829,7 +1829,7 @@ $("autoBtn").addEventListener("click", async () => {
 
 $("aiAutoBtn").addEventListener("click", async () => {
   switchContentTab("highlight");
-  autoSummary.textContent = "正在本地粗筛候选段落，并调用豆包 Seed 2.0 Pro 做剧情高光判断...";
+  autoSummary.textContent = "正在本地粗筛候选段落，并调用豆包 Seed 2.1 Turbo 做剧情高光判断...";
   try {
     await runTask("/api/ai-auto", {
       path: videoPath.value,
@@ -1985,7 +1985,7 @@ $("storyboardImagesBtn").addEventListener("click", async () => {
       allShots: storyboardPayload(),
       references: storyboardRefs.filter((ref) => ref.path && ref.path.trim()).slice(0, 16),
       referenceDescription: storyboardRefDescription.value.trim(),
-      size: apimartImageSize.value || "9:16",
+      size: apimartImageSize.value || "auto",
       resolution: apimartImageResolution.value || "1k",
       quality: normalizeImageQuality(apimartImageQuality.value),
     }, (data) => {
@@ -2017,7 +2017,7 @@ async function generateSingleStoryboardImage(index) {
       index,
       references: storyboardRefs.filter((ref) => ref.path && ref.path.trim()).slice(0, 16),
       referenceDescription: storyboardRefDescription.value.trim(),
-      size: apimartImageSize.value || "9:16",
+      size: apimartImageSize.value || "auto",
       resolution: apimartImageResolution.value || "1k",
       quality: normalizeImageQuality(apimartImageQuality.value),
     }, (data) => {
