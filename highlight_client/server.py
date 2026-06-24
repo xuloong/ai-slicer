@@ -1723,7 +1723,7 @@ def make_ocr_swift(image_dir: Path, fps: int) -> str:
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
             request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
-            request.minimumTextHeight = 0.032
+            request.minimumTextHeight = 0.02
 
             let handler = VNImageRequestHandler(cgImage: image, options: [:])
             do {{
@@ -1758,11 +1758,12 @@ def extract_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> 
         task_update(task_id, 28, "正在抽取字幕画面")
     ocr_dir = out_dir / "ocr"
     ocr_dir.mkdir(exist_ok=True)
-    fps = 1
+    duration = media_duration_seconds(video)
+    fps = 2 if duration and duration <= 900 else 1
     pattern = ocr_dir / "subtitle_%06d.jpg"
     extract = run([
         ffmpeg_path(), "-hide_banner", "-y", "-i", str(video),
-        "-vf", f"fps={fps},scale=540:-1", str(pattern)
+        "-vf", f"fps={fps},scale=960:-1", str(pattern)
     ], timeout=None, task_id=task_id)
     if extract.returncode != 0:
         return []
@@ -2414,7 +2415,7 @@ def storyboard_sample_times(video: Path) -> tuple[float, list[dict]]:
     return duration, samples
 
 
-def storyboard_dialogue_timeline(dialogues: list[dict], limit: int = 120) -> list[dict]:
+def storyboard_dialogue_timeline(dialogues: list[dict], limit: int = 260) -> list[dict]:
     timeline = []
     for item in dialogues[:limit]:
         try:
@@ -2428,27 +2429,39 @@ def storyboard_dialogue_timeline(dialogues: list[dict], limit: int = 120) -> lis
         timeline.append({
             "start": round(start, 1),
             "end": round(max(start, end), 1),
-            "text": text[:120],
+            "text": text[:220],
         })
     return timeline
 
 
-def dialogue_for_range(dialogues: list[dict], start: float, end: float) -> str:
+def dialogue_for_range(dialogues: list[dict], start: float, end: float, limit: int = 520) -> str:
     texts = []
+    padded_start = max(0.0, start - 0.35)
+    padded_end = end + 0.35
     for item in dialogues:
         try:
             text_start = float(item.get("time", 0))
             text_end = float(item.get("end", text_start + 1))
         except (TypeError, ValueError):
             continue
-        if text_end < start or text_start > end:
+        if text_end < padded_start or text_start > padded_end:
             continue
         text = str(item.get("text") or "").strip()
         if text and text not in texts:
             texts.append(text)
-        if len(" / ".join(texts)) >= 150:
+        if len(" / ".join(texts)) >= limit:
             break
-    return " / ".join(texts)[:160]
+    return " / ".join(texts)[:limit]
+
+
+def apply_dialogue_timeline_to_shots(shots: list[dict], dialogue_timeline: list[dict]) -> list[dict]:
+    if not dialogue_timeline:
+        return shots
+    for shot in shots:
+        text = dialogue_for_range(dialogue_timeline, float(shot.get("start", 0)), float(shot.get("end", 0)))
+        if text:
+            shot["dialogue"] = text
+    return shots
 
 
 def storyboard_prompt_payload(duration: float, requirement: str = "", samples: list[dict] | None = None, dialogue_timeline: list[dict] | None = None, direct_video: bool = False) -> dict:
@@ -2458,9 +2471,9 @@ def storyboard_prompt_payload(duration: float, requirement: str = "", samples: l
         "描述要具体，避免空泛。广告素材要突出卖点、价格、优惠、动作和转化点；剧情素材要突出人物、冲突、转折和钩子。"
     )
     if direct_video:
-        writing_rule += "请尽量结合视频画面、字幕和可识别语音判断真实台词；无法确认的台词返回空字符串，不要凭空改写或编造。"
+        writing_rule += "请尽量结合视频画面、字幕和可识别语音判断真实台词；同一镜头内出现多句台词时请按顺序保留主要原句；无法确认的台词返回空字符串，不要凭空改写或编造。"
     else:
-        writing_rule += "dialogue 字段只能引用字幕台词线索中对应时间段能确认的内容，无法确认就返回空字符串，不要凭空改写或编造台词。"
+        writing_rule += "dialogue 字段只能引用字幕台词线索中对应时间段能确认的内容；同一镜头内出现多句台词时请按顺序保留，不要只写一句；无法确认就返回空字符串，不要凭空改写或编造台词。"
     payload = {
         "task": task,
         "video_duration": round(duration, 1),
@@ -2513,7 +2526,7 @@ def normalize_storyboard(raw: object, duration: float) -> list[dict]:
             "shotType": str(item.get("shotType") or item.get("shot_type") or "中景").strip()[:40],
             "camera": str(item.get("camera") or "稳定镜头").strip()[:80],
             "action": str(item.get("action") or "展示关键动作").strip()[:180],
-            "dialogue": str(item.get("dialogue") or "").strip()[:160],
+            "dialogue": str(item.get("dialogue") or "").strip()[:520],
             "caption": str(item.get("caption") or "").strip()[:120],
             "edit": str(item.get("edit") or "自然衔接").strip()[:160],
         })
@@ -2540,6 +2553,12 @@ def analyze_ai_storyboard_by_video_url(video: Path, requirement: str = "", task_
     shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
     if not shots:
         raise RuntimeError("豆包未基于完整视频返回可用分镜。")
+    storyboard_dir = WORK / f"storyboard_direct_{uuid.uuid4().hex[:10]}"
+    storyboard_dir.mkdir(parents=True, exist_ok=True)
+    if task_id:
+        task_update(task_id, 90, "正在补全分镜台词")
+    dialogue_timeline = storyboard_dialogue_timeline(extract_dialogue(video, storyboard_dir, task_id=None))
+    shots = apply_dialogue_timeline_to_shots(shots, dialogue_timeline)
     return {
         "shots": shots,
         "summary": (ai.get("summary") or f"已根据完整视频生成 {len(shots)} 个分镜。") + "（已尝试直接上传完整视频给豆包分析）",
@@ -2583,11 +2602,7 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
     shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
     if not shots:
         raise RuntimeError("AI 没有返回可用的分镜脚本，请换一段视频或稍后重试。")
-    if dialogue_timeline:
-        for shot in shots:
-            text = dialogue_for_range(dialogue_timeline, float(shot.get("start", 0)), float(shot.get("end", 0)))
-            if text:
-                shot["dialogue"] = text
+    shots = apply_dialogue_timeline_to_shots(shots, dialogue_timeline)
     return {
         "shots": shots,
         "summary": ai.get("summary") or f"已根据视频内容生成 {len(shots)} 个分镜。",
