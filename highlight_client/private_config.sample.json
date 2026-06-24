@@ -11,5 +11,6 @@
   "TLS_ENDPOINT": "https://tls-cn-shanghai.volces.com",
   "TLS_REGION": "cn-shanghai",
   "TLS_PROJECT_NAME": "aivideo",
-  "TLS_TOPIC_NAME": "client-usage"
+  "TLS_TOPIC_NAME": "client-usage",
+  "WHISPER_MODEL": "base"
 }

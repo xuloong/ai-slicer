@@ -43,6 +43,7 @@ jobs:
           TLS_TOPIC_NAME: ${{ secrets.TLS_TOPIC_NAME }}
           TLS_ACCESS_KEY_ID: ${{ secrets.TLS_ACCESS_KEY_ID }}
           TLS_SECRET_ACCESS_KEY: ${{ secrets.TLS_SECRET_ACCESS_KEY }}
+          WHISPER_MODEL: ${{ secrets.WHISPER_MODEL }}
       - name: Disable updater artifact signing for installer artifact
         shell: pwsh
         run: |

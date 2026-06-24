@@ -1748,11 +1748,73 @@ def make_ocr_swift(image_dir: Path, fps: int) -> str:
     )
 
 
-def extract_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> list[dict]:
+def whisper_model_name() -> str:
+    private = load_private_config()
+    return (os.environ.get("WHISPER_MODEL") or private.get("WHISPER_MODEL") or "base").strip() or "base"
+
+
+def clean_transcript_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = re.sub(r"[\u200b-\u200f\ufeff]", "", cleaned)
+    return cleaned[:520]
+
+
+def extract_audio_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> list[dict]:
+    ensure_not_cancelled(task_id)
+    try:
+        from faster_whisper import WhisperModel
+    except Exception:
+        if task_id:
+            task_update(task_id, 18, "本机未启用语音识别，跳过 ASR 台词补全")
+        return []
+    if task_id:
+        task_update(task_id, 14, "正在提取音频")
+    audio_path = out_dir / "dialogue_audio.wav"
+    result = run([
+        ffmpeg_path(), "-hide_banner", "-y", "-i", str(video),
+        "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", str(audio_path),
+    ], timeout=None, task_id=task_id)
+    if result.returncode != 0 or not audio_path.exists():
+        return []
+    ensure_not_cancelled(task_id)
+    if task_id:
+        task_update(task_id, 22, "正在语音识别台词")
+    try:
+        model = WhisperModel(
+            whisper_model_name(),
+            device="cpu",
+            compute_type="int8",
+            download_root=str(DATA_DIR / "models" / "whisper"),
+        )
+        segments, _ = model.transcribe(
+            str(audio_path),
+            language="zh",
+            vad_filter=True,
+            beam_size=5,
+            word_timestamps=False,
+        )
+        rows = []
+        for segment in segments:
+            ensure_not_cancelled(task_id)
+            text = clean_transcript_text(getattr(segment, "text", ""))
+            if not text:
+                continue
+            rows.append({
+                "time": float(getattr(segment, "start", 0.0) or 0.0),
+                "end": float(getattr(segment, "end", 0.0) or 0.0),
+                "text": text,
+                "source": "asr",
+            })
+        return rows
+    except Exception:
+        if task_id:
+            task_update(task_id, 26, "语音识别不可用，继续使用视频画面分析")
+        return []
+
+
+def extract_ocr_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> list[dict]:
     ensure_not_cancelled(task_id)
     if not is_macos():
-        if task_id:
-            task_update(task_id, 48, "当前系统未启用本地 OCR，跳过台词识别")
         return []
     if task_id:
         task_update(task_id, 28, "正在抽取字幕画面")
@@ -1794,9 +1856,41 @@ def extract_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> 
         if text == previous_text and collapsed:
             collapsed[-1]["end"] = float(row.get("time", 0)) + 1
             continue
-        collapsed.append({"time": float(row.get("time", 0)), "end": float(row.get("time", 0)) + 1, "text": text})
+        collapsed.append({"time": float(row.get("time", 0)), "end": float(row.get("time", 0)) + 1, "text": text, "source": "ocr"})
         previous_text = text
     return collapsed
+
+
+def merge_dialogues(*groups: list[dict]) -> list[dict]:
+    items = []
+    seen = set()
+    for group in groups:
+        for item in group:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                start = float(item.get("time", 0))
+                end = float(item.get("end", start + 1))
+            except (TypeError, ValueError):
+                continue
+            key = (round(start, 1), text)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({
+                "time": start,
+                "end": max(start + 0.1, end),
+                "text": text,
+                "source": str(item.get("source") or "dialogue"),
+            })
+    return sorted(items, key=lambda item: (float(item.get("time", 0)), str(item.get("source") or "")))
+
+
+def extract_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> list[dict]:
+    asr_dialogues = extract_audio_dialogue(video, out_dir, task_id=task_id)
+    ocr_dialogues = extract_ocr_dialogue(video, out_dir, task_id=task_id)
+    return merge_dialogues(asr_dialogues, ocr_dialogues)
 
 
 def clean_dialogue_text(text: str) -> str:

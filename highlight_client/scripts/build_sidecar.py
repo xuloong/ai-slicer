@@ -71,6 +71,7 @@ def ensure_private_config() -> None:
         "TLS_TOPIC_NAME",
         "TLS_ACCESS_KEY_ID",
         "TLS_SECRET_ACCESS_KEY",
+        "WHISPER_MODEL",
     ):
         value = os.environ.get(key, "").strip()
         if value:
@@ -108,6 +109,12 @@ def main() -> None:
         "tos",
         "--collect-all",
         "volcengine",
+        "--collect-all",
+        "faster_whisper",
+        "--collect-all",
+        "ctranslate2",
+        "--collect-all",
+        "tokenizers",
         "server.py",
     ])
 

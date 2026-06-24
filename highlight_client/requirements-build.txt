@@ -4,3 +4,4 @@ imageio-ffmpeg>=0.6.0
 yt-dlp>=2025.0
 tos>=2.9.2
 volcengine>=1.0.223
+faster-whisper>=1.1.1
