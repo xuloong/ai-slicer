@@ -2163,7 +2163,7 @@ def normalize_ark_model_mode(value: object) -> str:
     return mode if mode in {"fast", "precise"} else "fast"
 
 
-def ark_model_candidates(model_mode: str = "fast") -> list[str]:
+def ark_model_candidates(model_mode: str = "precise") -> list[str]:
     configured = os.environ.get("ARK_MODEL", "").strip()
     if normalize_ark_model_mode(model_mode) == "precise":
         candidates = [configured, ARK_PRIMARY_MODEL, ARK_FALLBACK_MODEL]
@@ -2236,7 +2236,7 @@ def call_ark_chat_with_model(model: str, content: list[dict], task_id: str | Non
     return safe_text(content_text)
 
 
-def call_ark_chat(content: list[dict], task_id: str | None = None, model_mode: str = "fast") -> str:
+def call_ark_chat(content: list[dict], task_id: str | None = None, model_mode: str = "precise") -> str:
     last_error: Exception | None = None
     candidates = ark_model_candidates(model_mode)
     for index, model in enumerate(candidates):
