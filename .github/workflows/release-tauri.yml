@@ -6,6 +6,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   release-macos:
     runs-on: macos-14
@@ -68,7 +71,7 @@ jobs:
           releaseBody: "自动发布安装包和更新包。"
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: --target aarch64-apple-darwin --bundles dmg
 
@@ -131,6 +134,6 @@ jobs:
           releaseBody: "自动发布安装包和更新包。"
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: --bundles nsis
