@@ -15,6 +15,7 @@ const appVersion = $("appVersion");
 const settingsVersion = $("settingsVersion");
 const checkUpdateBtn = $("checkUpdateBtn");
 const updateState = $("updateState");
+const exportDiagnosticsBtn = $("exportDiagnosticsBtn");
 const whisperModelState = $("whisperModelState");
 const downloadWhisperModelBtn = $("downloadWhisperModelBtn");
 const clearWhisperModelBtn = $("clearWhisperModelBtn");
@@ -651,6 +652,28 @@ function addStoryVideoRef(ref) {
   }
   storyVideoRefs.push(ref);
   renderStoryVideoRefs();
+}
+
+function storyVideoReferencesPayload() {
+  const merged = storyVideoRefs.map((ref) => ({ ...ref }));
+  const seen = new Set(merged.map((ref) => ref.storageUrl || ref.url || ref.path || ref.src).filter(Boolean));
+  storyboardRefs.forEach((ref, index) => {
+    const storageUrl = ref.storageUrl || ref.imageStorageUrl || "";
+    const url = storageUrl || ref.url || ref.imageUrl || "";
+    const key = url || ref.path || ref.src;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push({
+      type: "image",
+      path: ref.path || "",
+      url,
+      storageUrl,
+      storagePath: ref.storagePath || ref.imageStoragePath || "",
+      src: ref.src || "",
+      title: ref.title || `分镜参考图 ${index + 1}`,
+    });
+  });
+  return merged;
 }
 
 function renderClips() {
@@ -1372,6 +1395,16 @@ $("pickFfmpegBtn").addEventListener("click", async () => {
 
 checkUpdateBtn?.addEventListener("click", () => {
   checkForAppUpdate({ silent: false });
+});
+
+exportDiagnosticsBtn?.addEventListener("click", async () => {
+  configState.textContent = "正在导出诊断信息...";
+  try {
+    const data = await post("/api/export-diagnostics", {});
+    configState.textContent = `诊断信息已导出：${data.path}`;
+  } catch (error) {
+    configState.textContent = error.message;
+  }
 });
 
 downloadWhisperModelBtn?.addEventListener("click", async () => {
@@ -2121,7 +2154,7 @@ async function generateStoryboardVideo(index) {
       shot: cleanStoryboardShot(payloadShot),
       allShots: storyboardPayload(),
       index,
-      references: storyVideoRefs,
+      references: storyVideoReferencesPayload(),
       ...defaults,
       videoDuration: payloadShot.videoDuration,
       videoResolution: payloadShot.videoResolution,

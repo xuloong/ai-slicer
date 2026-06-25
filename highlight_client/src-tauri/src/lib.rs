@@ -1,9 +1,15 @@
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
+use tauri::{Manager, RunEvent};
 
 const SERVER_PORT: u16 = 8765;
+
+struct ServerState {
+    sidecar_pid: Mutex<Option<u32>>,
+}
 
 fn server_matches_current_version(port: u16) -> bool {
     let Ok(mut addrs) = ("127.0.0.1", port).to_socket_addrs() else {
@@ -16,9 +22,8 @@ fn server_matches_current_version(port: u16) -> bool {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let request = format!(
-        "GET /api/config HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    );
+    let request =
+        format!("GET /api/config HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -74,9 +79,36 @@ fn stop_stale_server(port: u16) {
             .output();
 
         #[cfg(not(target_os = "windows"))]
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
     }
     std::thread::sleep(Duration::from_millis(500));
+}
+
+fn terminate_pid(pid: u32) {
+    #[cfg(target_os = "windows")]
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output();
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output();
+}
+
+fn stop_server_on_exit(pid: Option<u32>, port: u16) {
+    let listening_pids = pids_listening_on_port(port);
+    if let Some(pid) = pid {
+        if listening_pids.contains(&pid) {
+            terminate_pid(pid);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    for pid in pids_listening_on_port(port) {
+        terminate_pid(pid);
+    }
 }
 
 #[tauri::command]
@@ -121,6 +153,10 @@ pub fn run() {
         .setup(|app| {
             use tauri_plugin_shell::ShellExt;
 
+            app.manage(ServerState {
+                sidecar_pid: Mutex::new(None),
+            });
+
             #[cfg(not(debug_assertions))]
             stop_stale_server(SERVER_PORT);
 
@@ -128,7 +164,11 @@ pub fn run() {
             // In development, beforeDevCommand starts `python3 server.py`, so a
             // missing sidecar here is harmless.
             if let Ok(command) = app.shell().sidecar("highlight-server") {
-                let _ = command.spawn();
+                if let Ok((_events, child)) = command.spawn() {
+                    if let Ok(mut sidecar_pid) = app.state::<ServerState>().sidecar_pid.lock() {
+                        *sidecar_pid = Some(child.pid());
+                    }
+                }
             }
             Ok(())
         })
@@ -136,6 +176,14 @@ pub fn run() {
             check_for_update,
             install_update_if_available
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                let pid = app
+                    .try_state::<ServerState>()
+                    .and_then(|state| state.sidecar_pid.lock().ok().and_then(|pid| *pid));
+                stop_server_on_exit(pid, SERVER_PORT);
+            }
+        });
 }

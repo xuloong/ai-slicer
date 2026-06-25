@@ -8,6 +8,9 @@
   },
   "permissions": [
     "core:default",
+    "updater:default",
+    "allow-check-for-update",
+    "allow-install-update-if-available",
     {
       "identifier": "shell:allow-spawn",
       "allow": [

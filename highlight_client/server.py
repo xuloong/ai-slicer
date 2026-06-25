@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -261,6 +262,59 @@ def append_history(action: str, video: Path | None = None, **extra: object) -> N
         item.update({"video": str(video), "videoName": video.name})
     item.update(extra)
     save_history([item, *load_history()])
+
+
+def redact_mapping(data: dict) -> dict:
+    redacted = {}
+    secret_markers = ("key", "secret", "token", "cookie", "password")
+    for key, value in data.items():
+        if any(marker in key.lower() for marker in secret_markers):
+            text = str(value or "")
+            redacted[key] = f"已配置，长度 {len(text)}" if text else ""
+        elif isinstance(value, dict):
+            redacted[key] = redact_mapping(value)
+        else:
+            redacted[key] = value
+    return redacted
+
+
+def export_diagnostics() -> Path:
+    diag_dir = WORK / f"diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    with TASK_LOCK:
+        tasks = []
+        for task_id, task in list(TASKS.items())[-20:]:
+            item = {key: value for key, value in task.items() if key != "processes"}
+            item["taskId"] = task_id
+            tasks.append(item)
+    info = {
+        "app": "AI短视频创作工具",
+        "version": APP_VERSION,
+        "time": now_text(),
+        "platform": sys.platform,
+        "python": sys.version,
+        "dataDir": str(DATA_DIR),
+        "resourceRoot": str(RESOURCE_ROOT),
+        "whisperModel": whisper_model_status(),
+        "config": redact_mapping(load_config()),
+        "privateConfig": redact_mapping(load_private_config()),
+        "tos": redact_mapping(tos_config()),
+        "tls": redact_mapping(tls_config()),
+    }
+    try:
+        info["ffmpegPath"] = ffmpeg_path()
+        info["ffmpegDetected"] = shutil.which(info["ffmpegPath"]) or info["ffmpegPath"]
+    except Exception as exc:
+        info["ffmpegError"] = compact_log_text(exc)
+    (diag_dir / "system.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+    (diag_dir / "history.json").write_text(json.dumps(load_history()[:50], ensure_ascii=False, indent=2), encoding="utf-8")
+    (diag_dir / "tasks.json").write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+    output = EXPORTS / f"diagnostics_{APP_VERSION}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file in diag_dir.rglob("*"):
+            if file.is_file():
+                archive.write(file, file.relative_to(diag_dir))
+    return output
 
 
 def storyboard_history_with_generated(all_shots: object, generated: list[dict], index: int | None = None) -> list[dict]:
@@ -1418,26 +1472,49 @@ def apimart_upload_media(path: Path, kind: str, task_id: str | None = None) -> s
 
 
 def apimart_submit(url: str, payload: dict, task_id: str | None = None) -> str:
-    ensure_not_cancelled(task_id)
-    result = json_request("POST", url, payload, token=apimart_api_key(), timeout=120)
-    if int(result.get("code", 0)) != 200:
-        raise RuntimeError(f"AI 生成任务提交失败：{json.dumps(result, ensure_ascii=False)[:800]}")
-    data = result.get("data")
-    first = data[0] if isinstance(data, list) and data else {}
-    remote_task_id = first.get("task_id") or first.get("id")
-    if not remote_task_id:
-        raise RuntimeError(f"AI 生成任务未返回任务 ID：{json.dumps(result, ensure_ascii=False)[:800]}")
-    return str(remote_task_id)
+    last_error: Exception | None = None
+    for attempt in range(2):
+        ensure_not_cancelled(task_id)
+        if attempt and task_id:
+            task_update(task_id, TASKS.get(task_id, {}).get("progress", 1), "AI 生成任务提交失败，正在自动重试")
+        try:
+            result = json_request("POST", url, payload, token=apimart_api_key(), timeout=120)
+            if int(result.get("code", 0)) != 200:
+                raise RuntimeError(f"AI 生成任务提交失败：{json.dumps(result, ensure_ascii=False)[:800]}")
+            data = result.get("data")
+            first = data[0] if isinstance(data, list) and data else {}
+            remote_task_id = first.get("task_id") or first.get("id")
+            if not remote_task_id:
+                raise RuntimeError(f"AI 生成任务未返回任务 ID：{json.dumps(result, ensure_ascii=False)[:800]}")
+            return str(remote_task_id)
+        except Exception as exc:
+            last_error = exc
+            if "HTTP 4" in str(exc):
+                break
+            if attempt == 0:
+                threading.Event().wait(2)
+    raise RuntimeError(str(last_error or "AI 生成任务提交失败"))
 
 
 def apimart_poll(remote_task_id: str, task_id: str | None = None, base_progress: int = 10, span: int = 70, timeout_seconds: int = 1800) -> dict:
     started = datetime.now().timestamp()
+    transient_errors = 0
     while True:
         ensure_not_cancelled(task_id)
         elapsed = datetime.now().timestamp() - started
         if elapsed > timeout_seconds:
             raise RuntimeError("AI 生成任务等待超时，请稍后重试，或降低清晰度后再生成。")
-        result = json_request("GET", f"{APIMART_TASK_URL}/{remote_task_id}?language=zh", token=apimart_api_key(), timeout=60)
+        try:
+            result = json_request("GET", f"{APIMART_TASK_URL}/{remote_task_id}?language=zh", token=apimart_api_key(), timeout=60)
+            transient_errors = 0
+        except Exception as exc:
+            transient_errors += 1
+            if transient_errors <= 2:
+                if task_id:
+                    task_update(task_id, base_progress, f"AI 生成状态查询失败，正在重试 {transient_errors}/2")
+                threading.Event().wait(3)
+                continue
+            raise exc
         if int(result.get("code", 0)) != 200:
             raise RuntimeError(f"AI 生成任务查询失败：{json.dumps(result, ensure_ascii=False)[:800]}")
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -2595,15 +2672,17 @@ def storyboard_dialogue_timeline(dialogues: list[dict], limit: int = 260) -> lis
 
 def dialogue_for_range(dialogues: list[dict], start: float, end: float, limit: int = 520) -> str:
     texts = []
-    padded_start = max(0.0, start - 0.35)
-    padded_end = end + 0.35
+    padded_start = max(0.0, start - 0.15)
+    padded_end = end + 0.15
     for item in dialogues:
         try:
             text_start = float(item.get("time", 0))
             text_end = float(item.get("end", text_start + 1))
         except (TypeError, ValueError):
             continue
-        if text_end < padded_start or text_start > padded_end:
+        midpoint = (text_start + text_end) / 2
+        overlap = min(text_end, padded_end) - max(text_start, padded_start)
+        if overlap <= 0 and not (padded_start <= midpoint <= padded_end):
             continue
         text = str(item.get("text") or "").strip()
         if text and text not in texts:
@@ -2613,14 +2692,31 @@ def dialogue_for_range(dialogues: list[dict], start: float, end: float, limit: i
     return " / ".join(texts)[:limit]
 
 
+def dedupe_storyboard_dialogues(shots: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    previous = ""
+    for shot in shots:
+        text = str(shot.get("dialogue") or "").strip()
+        normalized = re.sub(r"\s+", "", text)
+        if not normalized:
+            shot["dialogue"] = ""
+            continue
+        if normalized == previous or normalized in seen:
+            shot["dialogue"] = ""
+            continue
+        seen.add(normalized)
+        previous = normalized
+        shot["dialogue"] = text
+    return shots
+
+
 def apply_dialogue_timeline_to_shots(shots: list[dict], dialogue_timeline: list[dict]) -> list[dict]:
     if not dialogue_timeline:
-        return shots
+        return dedupe_storyboard_dialogues(shots)
     for shot in shots:
         text = dialogue_for_range(dialogue_timeline, float(shot.get("start", 0)), float(shot.get("end", 0)))
-        if text:
-            shot["dialogue"] = text
-    return shots
+        shot["dialogue"] = text
+    return dedupe_storyboard_dialogues(shots)
 
 
 def storyboard_prompt_payload(duration: float, requirement: str = "", samples: list[dict] | None = None, dialogue_timeline: list[dict] | None = None, direct_video: bool = False) -> dict:
@@ -2630,9 +2726,9 @@ def storyboard_prompt_payload(duration: float, requirement: str = "", samples: l
         "描述要具体，避免空泛。广告素材要突出卖点、价格、优惠、动作和转化点；剧情素材要突出人物、冲突、转折和钩子。"
     )
     if direct_video:
-        writing_rule += "请尽量结合视频画面、字幕和可识别语音判断真实台词；同一镜头内出现多句台词时请按顺序保留主要原句；无法确认的台词返回空字符串，不要凭空改写或编造。"
+        writing_rule += "请尽量结合视频画面、字幕和可识别语音判断真实台词；每个镜头的 dialogue 只能放该镜头时间段内实际出现的台词，不要复制到其他镜头；同一镜头内出现多句台词时请按顺序保留主要原句；无法确认的台词返回空字符串，不要凭空改写或编造。"
     else:
-        writing_rule += "dialogue 字段只能引用字幕台词线索中对应时间段能确认的内容；同一镜头内出现多句台词时请按顺序保留，不要只写一句；无法确认就返回空字符串，不要凭空改写或编造台词。"
+        writing_rule += "dialogue 字段只能引用字幕台词线索中对应时间段能确认的内容；不要把同一句台词放进多个镜头；同一镜头内出现多句台词时请按顺序保留，不要只写一句；无法确认就返回空字符串，不要凭空改写或编造台词。"
     payload = {
         "task": task,
         "video_duration": round(duration, 1),
@@ -2794,17 +2890,46 @@ def storyboard_video_prompt(shot: dict, index: int) -> str:
     parts = [
         "根据分镜生成自然流畅的短视频片段，真实广告片质感，动作连贯，镜头稳定，不要出现变形文字和错误字幕。",
         "如果提供首帧参考图，请把它理解为单一竖屏视频画面的首帧来延展，不要生成分屏、拼图、漫画格或多个画面同时出现的效果。",
+        "这是完整短视频中的一个连续镜头。必须保持核心人物、服装、发型、商品、场景空间、光线、色调、声音风格和表演状态与前后镜头一致，方便多个片段按顺序直接合并。",
         f"镜头{shot.get('shot') or index}",
         f"画面：{shot.get('scene') or ''}",
         f"动作：{shot.get('action') or ''}",
         f"运镜：{shot.get('camera') or '轻微推进'}",
         f"剪辑节奏：{shot.get('edit') or '自然衔接'}",
     ]
+    if shot.get("sequenceContext"):
+        parts.append(f"上下文连续性参考：{shot.get('sequenceContext')}")
     if shot.get("dialogue"):
         parts.append(f"剧情/台词参考：{shot.get('dialogue')}")
     if shot.get("caption"):
         parts.append(f"重点信息参考：{shot.get('caption')}")
     return "\n".join(str(part).strip() for part in parts if str(part).strip())[:1800]
+
+
+def compact_shot_for_context(shot: dict, label: str) -> str:
+    bits = [
+        label,
+        f"画面：{shot.get('scene') or ''}",
+        f"动作：{shot.get('action') or ''}",
+    ]
+    if shot.get("dialogue"):
+        bits.append(f"台词：{shot.get('dialogue')}")
+    if shot.get("caption"):
+        bits.append(f"字幕/重点：{shot.get('caption')}")
+    return "，".join(str(bit).strip() for bit in bits if str(bit).strip())
+
+
+def storyboard_sequence_context(all_shots: object, index: int) -> str:
+    shots = normalize_generation_shots(all_shots)
+    if not shots or index < 0 or index >= len(shots):
+        return ""
+    parts = []
+    if index > 0:
+        parts.append(compact_shot_for_context(shots[index - 1], "上一镜"))
+    parts.append(compact_shot_for_context(shots[index], "当前镜"))
+    if index + 1 < len(shots):
+        parts.append(compact_shot_for_context(shots[index + 1], "下一镜"))
+    return "；".join(parts)[:900]
 
 
 def normalize_generation_shots(raw: object) -> list[dict]:
@@ -4342,6 +4467,13 @@ class Handler(BaseHTTPRequestHandler):
                 response(self, 200, {"path": str(DOWNLOADS)})
                 return
 
+            if self.path == "/api/export-diagnostics":
+                output = export_diagnostics()
+                reveal_in_finder(output)
+                notify_feature_used("导出诊断信息", f"文件：{output.name}")
+                response(self, 200, {"path": str(output)})
+                return
+
             if self.path == "/api/whisper/download":
                 def worker(tid: str) -> dict:
                     return ensure_whisper_model_cached(task_id=tid)
@@ -4597,7 +4729,10 @@ class Handler(BaseHTTPRequestHandler):
                 generate_audio = normalize_bool(payload.get("generateAudio"), bool(config.get("seedanceAudio", True)))
                 notify_feature_used("生成视频片段", f"镜头数：{len(shots) if isinstance(shots, list) else 0}，时长：{duration} 秒，清晰度：{resolution}，比例：{size}，声音：{'是' if generate_audio else '否'}")
                 def worker(tid: str) -> dict:
-                    result = generate_storyboard_videos(shots, duration=duration, resolution=resolution, size=size, generate_audio=generate_audio, references_raw=references, task_id=tid)
+                    contextual_shots = normalize_generation_shots(shots)
+                    for shot_index, shot_item in enumerate(contextual_shots):
+                        shot_item["sequenceContext"] = storyboard_sequence_context(contextual_shots, shot_index)
+                    result = generate_storyboard_videos(contextual_shots, duration=duration, resolution=resolution, size=size, generate_audio=generate_audio, references_raw=references, task_id=tid)
                     append_history("生成视频片段", None, summary=result.get("summary", ""), storyboard=result.get("shots", [])[:24], videoReferences=normalize_story_video_references(references)[:15], outputDir=result.get("outputDir", ""))
                     return result
                 task_id = start_task("生成视频片段", worker)
@@ -4628,6 +4763,7 @@ class Handler(BaseHTTPRequestHandler):
                         "videoResolution": resolution,
                         "videoSize": size,
                         "videoAudio": generate_audio,
+                        "sequenceContext": storyboard_sequence_context(all_shots, index - 1),
                     })
                     result = generate_storyboard_videos([current], duration=duration, resolution=resolution, size=size, generate_audio=generate_audio, references_raw=references, task_id=tid)
                     generated = (result.get("shots") or [current])[0]

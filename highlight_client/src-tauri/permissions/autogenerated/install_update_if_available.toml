@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-update-if-available"
+description = "Enables the install_update_if_available command without any pre-configured scope."
+commands.allow = ["install_update_if_available"]
+
+[[permission]]
+identifier = "deny-install-update-if-available"
+description = "Denies the install_update_if_available command without any pre-configured scope."
+commands.deny = ["install_update_if_available"]

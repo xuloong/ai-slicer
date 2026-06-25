@@ -60,8 +60,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: highlight_client
-          tagName: v__VERSION__
-          releaseName: "AI短视频创作工具 v__VERSION__"
+          tagName: v0.1.2
+          releaseName: "AI短视频创作工具 v0.1.2"
           releaseBody: "自动发布安装包和更新包。"
           releaseDraft: false
           prerelease: false
@@ -123,8 +123,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: highlight_client
-          tagName: v__VERSION__
-          releaseName: "AI短视频创作工具 v__VERSION__"
+          tagName: v0.1.2
+          releaseName: "AI短视频创作工具 v0.1.2"
           releaseBody: "自动发布安装包和更新包。"
           releaseDraft: false
           prerelease: false
