@@ -56,15 +56,15 @@ jobs:
           BUNDLE_WHISPER_MODEL: ${{ secrets.BUNDLE_WHISPER_MODEL }}
 
       - name: Build and publish Tauri release
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: highlight_client
-          tagName: v0.1.2
-          releaseName: "AI短视频创作工具 v0.1.2"
+          tagName: ${{ github.ref_name }}
+          releaseName: "AI短视频创作工具 ${{ github.ref_name }}"
           releaseBody: "自动发布安装包和更新包。"
           releaseDraft: false
           prerelease: false
@@ -119,15 +119,15 @@ jobs:
           BUNDLE_WHISPER_MODEL: ${{ secrets.BUNDLE_WHISPER_MODEL }}
 
       - name: Build and publish Tauri release
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: highlight_client
-          tagName: v0.1.2
-          releaseName: "AI短视频创作工具 v0.1.2"
+          tagName: ${{ github.ref_name }}
+          releaseName: "AI短视频创作工具 ${{ github.ref_name }}"
           releaseBody: "自动发布安装包和更新包。"
           releaseDraft: false
           prerelease: false
