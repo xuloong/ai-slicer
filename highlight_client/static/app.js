@@ -15,6 +15,9 @@ const appVersion = $("appVersion");
 const settingsVersion = $("settingsVersion");
 const checkUpdateBtn = $("checkUpdateBtn");
 const updateState = $("updateState");
+const whisperModelState = $("whisperModelState");
+const downloadWhisperModelBtn = $("downloadWhisperModelBtn");
+const clearWhisperModelBtn = $("clearWhisperModelBtn");
 const videoPath = $("videoPath");
 const shareUrl = $("shareUrl");
 const info = $("info");
@@ -1219,6 +1222,7 @@ async function loadConfig() {
     const versionText = `版本 v${data.version || "0.1.1"}`;
     if (appVersion) appVersion.textContent = versionText;
     if (settingsVersion) settingsVersion.textContent = `当前${versionText}`;
+    renderWhisperModelState(data.whisperModel);
     ffmpegPath.value = data.ffmpegPath || "";
     downloadRetentionDays.value = String(data.downloadRetentionDays ?? 30);
     if (douyinCookie) {
@@ -1253,6 +1257,27 @@ async function loadConfig() {
     configState.textContent = error.message;
     return null;
   }
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!value) return "";
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)}KB`;
+  if (value < 1024 * 1024 * 1024) return `${Math.round(value / 1024 / 1024)}MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)}GB`;
+}
+
+function renderWhisperModelState(state) {
+  if (!whisperModelState) return;
+  if (!state) {
+    whisperModelState.textContent = "模型状态：未读取";
+    return;
+  }
+  const size = formatBytes(state.sizeBytes);
+  const suffix = size ? `，${size}` : "";
+  whisperModelState.textContent = `模型状态：${state.model || "base"}，${state.source || "未知"}${suffix}`;
+  if (downloadWhisperModelBtn) downloadWhisperModelBtn.disabled = Boolean(state.ready);
+  if (clearWhisperModelBtn) clearWhisperModelBtn.disabled = !state.cached;
 }
 
 function normalizeTemplates(templates) {
@@ -1347,6 +1372,30 @@ $("pickFfmpegBtn").addEventListener("click", async () => {
 
 checkUpdateBtn?.addEventListener("click", () => {
   checkForAppUpdate({ silent: false });
+});
+
+downloadWhisperModelBtn?.addEventListener("click", async () => {
+  configState.textContent = "正在下载语音识别模型...";
+  try {
+    await runTask("/api/whisper/download", {}, (data) => {
+      renderWhisperModelState(data);
+      configState.textContent = "语音识别模型已准备好";
+    });
+    await loadConfig();
+  } catch (error) {
+    configState.textContent = error.message;
+  }
+});
+
+clearWhisperModelBtn?.addEventListener("click", async () => {
+  configState.textContent = "正在清理语音识别模型...";
+  try {
+    const data = await post("/api/whisper/clear", {});
+    renderWhisperModelState(data);
+    configState.textContent = "语音识别模型缓存已清理";
+  } catch (error) {
+    configState.textContent = error.message;
+  }
 });
 
 $("saveConfigBtn").addEventListener("click", async () => {

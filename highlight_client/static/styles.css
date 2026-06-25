@@ -434,7 +434,8 @@ button:hover {
 }
 
 .settingsSaveRow,
-.settingsUpdateRow {
+.settingsUpdateRow,
+.settingsModelRow {
   display: flex;
   gap: 12px;
   align-items: center;
@@ -444,7 +445,8 @@ button:hover {
 }
 
 .settingsSaveRow .configState,
-.settingsUpdateRow .settingsVersion {
+.settingsUpdateRow .settingsVersion,
+.settingsModelRow .settingsVersion {
   margin-right: auto;
 }
 

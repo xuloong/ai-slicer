@@ -317,6 +317,7 @@ def public_config() -> dict:
         "downloadRetentionDays": download_retention_days(),
         "packageTemplate": config.get("packageTemplate", "none"),
         "packageTemplates": configured_package_templates(),
+        "whisperModel": whisper_model_status(),
     }
 
 
@@ -1759,6 +1760,62 @@ def whisper_model_source() -> str:
     if bundled.exists():
         return str(bundled)
     return model_name
+
+
+def whisper_model_cache_dir() -> Path:
+    return DATA_DIR / "models" / "whisper"
+
+
+def whisper_model_status() -> dict:
+    model_name = whisper_model_name()
+    bundled = RESOURCE_ROOT / "models" / "whisper" / model_name
+    cache_dir = whisper_model_cache_dir()
+    cached = cache_dir.exists() and any(cache_dir.iterdir())
+    bundled_ready = bundled.exists() and any(bundled.iterdir())
+    size = 0
+    for root in [bundled if bundled_ready else None, cache_dir if cached else None]:
+        if not root:
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                try:
+                    size += path.stat().st_size
+                except OSError:
+                    pass
+    return {
+        "model": model_name,
+        "source": "内置" if bundled_ready else ("本机缓存" if cached else "未下载"),
+        "ready": bool(bundled_ready or cached),
+        "bundled": bool(bundled_ready),
+        "cached": bool(cached),
+        "cacheDir": str(cache_dir),
+        "sizeBytes": size,
+    }
+
+
+def ensure_whisper_model_cached(task_id: str | None = None) -> dict:
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        raise RuntimeError(f"语音识别依赖不可用：{exc}") from exc
+    if task_id:
+        task_update(task_id, 8, "正在准备语音识别模型")
+    WhisperModel(
+        whisper_model_source(),
+        device="cpu",
+        compute_type="int8",
+        download_root=str(whisper_model_cache_dir()),
+    )
+    if task_id:
+        task_update(task_id, 96, "语音识别模型已就绪")
+    return whisper_model_status()
+
+
+def clear_whisper_model_cache() -> dict:
+    cache_dir = whisper_model_cache_dir()
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    return whisper_model_status()
 
 
 def clean_transcript_text(text: str) -> str:
@@ -4192,6 +4249,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             response(self, 200, public_config())
             return
+        if path == "/api/whisper/status":
+            response(self, 200, whisper_model_status())
+            return
         if path == "/api/auth/status":
             response(self, 200, auth_state())
             return
@@ -4280,6 +4340,17 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/open-downloads":
                 open_folder(DOWNLOADS)
                 response(self, 200, {"path": str(DOWNLOADS)})
+                return
+
+            if self.path == "/api/whisper/download":
+                def worker(tid: str) -> dict:
+                    return ensure_whisper_model_cached(task_id=tid)
+                task_id = start_task("下载语音识别模型", worker)
+                response(self, 200, {"taskId": task_id})
+                return
+
+            if self.path == "/api/whisper/clear":
+                response(self, 200, clear_whisper_model_cache())
                 return
 
             if self.path == "/api/config":

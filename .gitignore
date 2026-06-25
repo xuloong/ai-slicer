@@ -27,3 +27,4 @@ highlight_client/**/*.pyc
 highlight_client/src-tauri/target/
 highlight_client/src-tauri/binaries/
 highlight_client/private_config.json
+highlight_client/models/

@@ -103,7 +103,7 @@ def truthy(value: str) -> bool:
 
 
 def ensure_whisper_model() -> Path | None:
-    if not truthy(os.environ.get("BUNDLE_WHISPER_MODEL", "1")):
+    if not truthy(private_config_value("BUNDLE_WHISPER_MODEL", "0")):
         return None
     model_name = private_config_value("WHISPER_MODEL", "base")
     target = WHISPER_MODELS / model_name

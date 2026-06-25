@@ -14,5 +14,5 @@
   "TLS_TOPIC_NAME": "client-usage",
   "WHISPER_MODEL": "base",
   "WHISPER_REPO_ID": "Systran/faster-whisper-base",
-  "BUNDLE_WHISPER_MODEL": "1"
+  "BUNDLE_WHISPER_MODEL": "0"
 }
