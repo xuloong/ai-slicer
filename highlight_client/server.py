@@ -2035,6 +2035,17 @@ def extract_dialogue(video: Path, out_dir: Path, task_id: str | None = None) -> 
     return merge_dialogues(asr_dialogues, ocr_dialogues)
 
 
+def extract_storyboard_text_tracks(video: Path, out_dir: Path, task_id: str | None = None) -> tuple[list[dict], list[dict]]:
+    asr_dialogues = extract_audio_dialogue(video, out_dir, task_id=task_id)
+    ocr_texts = extract_ocr_dialogue(video, out_dir, task_id=task_id)
+    speech_timeline = storyboard_dialogue_timeline(asr_dialogues)
+    screen_text_timeline = storyboard_dialogue_timeline(
+        [item for item in ocr_texts if not is_screen_text_noise(str(item.get("text") or ""))],
+        limit=120,
+    )
+    return speech_timeline, screen_text_timeline
+
+
 def clean_dialogue_text(text: str) -> str:
     cleaned = text
     noise_patterns = [
@@ -2666,27 +2677,82 @@ def storyboard_dialogue_timeline(dialogues: list[dict], limit: int = 260) -> lis
             "start": round(start, 1),
             "end": round(max(start, end), 1),
             "text": text[:220],
+            "source": str(item.get("source") or "dialogue"),
         })
     return timeline
 
 
+def is_screen_text_noise(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    if not normalized:
+        return True
+    noise_patterns = (
+        "所展示金额",
+        "广告创意",
+        "广告创烹",
+        "实际奖励",
+        "具体金额",
+        "活动规则",
+        "视频内容仅为广告",
+        "请勿充值转账",
+        "完成指定积累提现额度",
+        "达到指定等级可提现",
+    )
+    if any(pattern in normalized for pattern in noise_patterns):
+        return True
+    if len(normalized) > 70 and ("可提现" in normalized or "奖励" in normalized or "规则" in normalized):
+        return True
+    return False
+
+
+def split_dialogue_fragments(text: str) -> list[str]:
+    raw = str(text or "").replace("\n", " / ")
+    parts = re.split(r"\s*/\s*|[；;]\s*", raw)
+    fragments = []
+    for part in parts:
+        cleaned = clean_dialogue_text(part).strip()
+        if not cleaned or is_screen_text_noise(cleaned):
+            continue
+        fragments.append(cleaned)
+    return fragments
+
+
+def clean_storyboard_dialogue_text(text: str, limit: int = 260) -> str:
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for fragment in split_dialogue_fragments(text):
+        key = re.sub(r"\s+", "", fragment)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        fragments.append(fragment)
+        if len(" / ".join(fragments)) >= limit:
+            break
+    return " / ".join(fragments)[:limit]
+
+
 def dialogue_for_range(dialogues: list[dict], start: float, end: float, limit: int = 520) -> str:
     texts = []
-    padded_start = max(0.0, start - 0.15)
-    padded_end = end + 0.15
+    padded_start = max(0.0, start - 0.05)
+    padded_end = end + 0.05
     for item in dialogues:
         try:
-            text_start = float(item.get("time", 0))
+            text_start = float(item.get("time", item.get("start", 0)))
             text_end = float(item.get("end", text_start + 1))
         except (TypeError, ValueError):
             continue
         midpoint = (text_start + text_end) / 2
         overlap = min(text_end, padded_end) - max(text_start, padded_start)
-        if overlap <= 0 and not (padded_start <= midpoint <= padded_end):
+        if overlap <= 0:
             continue
-        text = str(item.get("text") or "").strip()
-        if text and text not in texts:
-            texts.append(text)
+        duration = max(0.1, text_end - text_start)
+        if not (padded_start <= midpoint <= padded_end) and overlap < min(1.2, duration * 0.55):
+            continue
+        text = clean_storyboard_dialogue_text(str(item.get("text") or ""))
+        if text:
+            for fragment in split_dialogue_fragments(text):
+                if fragment not in texts:
+                    texts.append(fragment)
         if len(" / ".join(texts)) >= limit:
             break
     return " / ".join(texts)[:limit]
@@ -2694,18 +2760,21 @@ def dialogue_for_range(dialogues: list[dict], start: float, end: float, limit: i
 
 def dedupe_storyboard_dialogues(shots: list[dict]) -> list[dict]:
     seen: set[str] = set()
-    previous = ""
+    used_fragments: set[str] = set()
     for shot in shots:
-        text = str(shot.get("dialogue") or "").strip()
+        fragments = []
+        for fragment in split_dialogue_fragments(str(shot.get("dialogue") or "")):
+            normalized = re.sub(r"\s+", "", fragment)
+            if not normalized or normalized in used_fragments:
+                continue
+            used_fragments.add(normalized)
+            fragments.append(fragment)
+        text = " / ".join(fragments)[:260]
         normalized = re.sub(r"\s+", "", text)
-        if not normalized:
-            shot["dialogue"] = ""
-            continue
-        if normalized == previous or normalized in seen:
+        if not normalized or normalized in seen:
             shot["dialogue"] = ""
             continue
         seen.add(normalized)
-        previous = normalized
         shot["dialogue"] = text
     return shots
 
@@ -2719,16 +2788,16 @@ def apply_dialogue_timeline_to_shots(shots: list[dict], dialogue_timeline: list[
     return dedupe_storyboard_dialogues(shots)
 
 
-def storyboard_prompt_payload(duration: float, requirement: str = "", samples: list[dict] | None = None, dialogue_timeline: list[dict] | None = None, direct_video: bool = False) -> dict:
-    task = "根据完整视频内容生成可执行的中文分镜脚本。请只返回严格 JSON，不要输出解释文字。" if direct_video else "根据视频代表帧、时间信息和字幕台词线索，生成可执行的中文分镜脚本。请只返回严格 JSON，不要输出解释文字。"
+def storyboard_prompt_payload(duration: float, requirement: str = "", samples: list[dict] | None = None, dialogue_timeline: list[dict] | None = None, screen_text_timeline: list[dict] | None = None, direct_video: bool = False) -> dict:
+    task = "根据完整视频内容生成可执行的中文分镜脚本。请只返回严格 JSON，不要输出解释文字。" if direct_video else "根据视频代表帧、时间信息、语音台词和画面文字线索，生成可执行的中文分镜脚本。请只返回严格 JSON，不要输出解释文字。"
     writing_rule = (
         "每个镜头要相对独立，单个镜头时长根据实际内容决定，但不要超过15秒；时间段尽量连续且覆盖主要内容。"
         "描述要具体，避免空泛。广告素材要突出卖点、价格、优惠、动作和转化点；剧情素材要突出人物、冲突、转折和钩子。"
     )
     if direct_video:
-        writing_rule += "请尽量结合视频画面、字幕和可识别语音判断真实台词；每个镜头的 dialogue 只能放该镜头时间段内实际出现的台词，不要复制到其他镜头；同一镜头内出现多句台词时请按顺序保留主要原句；无法确认的台词返回空字符串，不要凭空改写或编造。"
+        writing_rule += "请区分人物真实说出口的台词和画面上的文字。dialogue 字段只写人物在该镜头时间段内实际说出口的台词；顶部合规提示、APP界面、活动规则、金额规则、按钮文字等画面文字不要放进 dialogue，可概括到 caption 或 scene。不要把同一句台词复制到多个镜头；无法确认真实台词则 dialogue 返回空字符串。"
     else:
-        writing_rule += "dialogue 字段只能引用字幕台词线索中对应时间段能确认的内容；不要把同一句台词放进多个镜头；同一镜头内出现多句台词时请按顺序保留，不要只写一句；无法确认就返回空字符串，不要凭空改写或编造台词。"
+        writing_rule += "dialogue 字段只能引用 speech_timeline 中对应时间段能确认的人物真实台词；screen_text_timeline 只代表画面文字或OCR线索，不能直接写进 dialogue。顶部合规提示、APP界面、活动规则、金额规则、按钮文字等只能作为画面/字幕参考。不要把同一句台词放进多个镜头；无法确认就返回空字符串，不要凭空改写或编造台词。"
     payload = {
         "task": task,
         "video_duration": round(duration, 1),
@@ -2743,8 +2812,8 @@ def storyboard_prompt_payload(duration: float, requirement: str = "", samples: l
                 "shotType": "景别，如特写/近景/中景/全景",
                 "camera": "运镜或镜头调度",
                 "action": "人物/商品/画面动作",
-                "dialogue": "关键台词，没有则空字符串",
-                "caption": "建议字幕/花字，没有则空字符串",
+                "dialogue": "该镜头人物真实说出口的关键台词，没有则空字符串",
+                "caption": "建议字幕/花字/画面重点文字，没有则空字符串",
                 "edit": "剪辑节奏、转场或音效建议",
             }],
             "summary": "中文总结这个视频的分镜逻辑和成片方向",
@@ -2753,7 +2822,9 @@ def storyboard_prompt_payload(duration: float, requirement: str = "", samples: l
     if samples:
         payload["samples"] = samples
     if dialogue_timeline:
-        payload["dialogue_timeline"] = dialogue_timeline
+        payload["speech_timeline"] = dialogue_timeline
+    if screen_text_timeline:
+        payload["screen_text_timeline"] = screen_text_timeline
     return payload
 
 
@@ -2812,8 +2883,8 @@ def analyze_ai_storyboard_by_video_url(video: Path, requirement: str = "", task_
     storyboard_dir.mkdir(parents=True, exist_ok=True)
     if task_id:
         task_update(task_id, 90, "正在补全分镜台词")
-    dialogue_timeline = storyboard_dialogue_timeline(extract_dialogue(video, storyboard_dir, task_id=None))
-    shots = apply_dialogue_timeline_to_shots(shots, dialogue_timeline)
+    speech_timeline, _screen_text_timeline = extract_storyboard_text_tracks(video, storyboard_dir, task_id=None)
+    shots = apply_dialogue_timeline_to_shots(shots, speech_timeline)
     return {
         "shots": shots,
         "summary": (ai.get("summary") or f"已根据完整视频生成 {len(shots)} 个分镜。") + "（已尝试直接上传完整视频给豆包分析）",
@@ -2834,12 +2905,11 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
     storyboard_dir = WORK / f"storyboard_{uuid.uuid4().hex[:10]}"
     storyboard_dir.mkdir(parents=True, exist_ok=True)
     if task_id:
-        task_update(task_id, 10, "正在识别字幕台词")
-    dialogues = extract_dialogue(video, storyboard_dir, task_id=task_id)
-    dialogue_timeline = storyboard_dialogue_timeline(dialogues)
+        task_update(task_id, 10, "正在识别语音台词和画面文字")
+    speech_timeline, screen_text_timeline = extract_storyboard_text_tracks(video, storyboard_dir, task_id=task_id)
     content: list[dict] = [{
         "type": "text",
-        "text": json.dumps(storyboard_prompt_payload(duration, requirement, samples=samples, dialogue_timeline=dialogue_timeline), ensure_ascii=False),
+        "text": json.dumps(storyboard_prompt_payload(duration, requirement, samples=samples, dialogue_timeline=speech_timeline, screen_text_timeline=screen_text_timeline), ensure_ascii=False),
     }]
     for index, sample in enumerate(samples, start=1):
         ensure_not_cancelled(task_id)
@@ -2857,7 +2927,7 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
     shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
     if not shots:
         raise RuntimeError("AI 没有返回可用的分镜脚本，请换一段视频或稍后重试。")
-    shots = apply_dialogue_timeline_to_shots(shots, dialogue_timeline)
+    shots = apply_dialogue_timeline_to_shots(shots, speech_timeline)
     return {
         "shots": shots,
         "summary": ai.get("summary") or f"已根据视频内容生成 {len(shots)} 个分镜。",
