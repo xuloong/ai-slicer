@@ -123,6 +123,13 @@ DEFAULT_TLS_PROJECT_NAME = "aivideo"
 DEFAULT_TLS_TOPIC_NAME = "client-usage"
 DEFAULT_TLS_TTL_DAYS = 30
 WECOM_SESSION_TTL = timedelta(hours=72)
+FALLBACK_LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+<defs><linearGradient id="g" x1="16" y1="16" x2="112" y2="112" gradientUnits="userSpaceOnUse"><stop stop-color="#35c7ff"/><stop offset=".52" stop-color="#7c5cff"/><stop offset="1" stop-color="#ff61d8"/></linearGradient></defs>
+<rect width="128" height="128" rx="28" fill="#090b2f"/>
+<path d="M28 34h50c12 0 22 10 22 22v16c0 12-10 22-22 22H28V34Z" fill="none" stroke="url(#g)" stroke-width="10" stroke-linejoin="round"/>
+<path d="M58 52v24l22-12-22-12Z" fill="url(#g)"/>
+<path d="M92 80l20 20M112 80l-20 20" stroke="#fff" stroke-width="7" stroke-linecap="round"/>
+</svg>"""
 FFMPEG_CANDIDATES = [
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
@@ -1791,6 +1798,16 @@ def parse_media_info(stderr: object) -> dict:
     return info
 
 
+def merge_media_info(primary: dict | None, fallback: dict | None) -> dict:
+    merged = dict(fallback or {})
+    for key, value in (primary or {}).items():
+        if value not in {"", None, "未知", "未检测到"}:
+            merged[key] = value
+    for key in ("duration", "video", "audio", "resolution", "ratio", "fps", "bitrate"):
+        merged.setdefault(key, "未知" if key not in {"video", "audio"} else "未检测到")
+    return merged
+
+
 def parse_fraction_rate(value: object) -> float:
     text = str(value or "").strip()
     if not text or text == "0/0":
@@ -1994,13 +2011,17 @@ def probe_media_info(video: Path) -> dict:
     info = ffprobe_media_info(video)
     if info:
         return info
-    info = mp4_atom_media_info(video)
-    if info:
-        return info
-    result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
-    info = parse_media_info(result.stderr)
-    info["durationSeconds"] = parse_duration_seconds(result.stderr)
-    return info
+    atom_info = mp4_atom_media_info(video)
+    try:
+        result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
+        ffmpeg_info = parse_media_info(result.stderr)
+        ffmpeg_info["durationSeconds"] = parse_duration_seconds(result.stderr)
+    except Exception:
+        ffmpeg_info = {}
+    merged = merge_media_info(ffmpeg_info, atom_info)
+    if atom_info and atom_info.get("durationSeconds") and not merged.get("durationSeconds"):
+        merged["durationSeconds"] = atom_info.get("durationSeconds")
+    return merged
 
 
 def seconds_to_clock(value: float) -> str:
@@ -4735,6 +4756,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/static/"):
             file_path = STATIC / path.removeprefix("/static/")
+            if path == "/static/app-logo.png" and not file_path.exists():
+                data = FALLBACK_LOGO_SVG.encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "image/svg+xml")
+                self.send_header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
             self.send_static(file_path, content_type)
             return

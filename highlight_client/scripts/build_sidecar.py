@@ -86,7 +86,7 @@ def ensure_required_private_config() -> None:
     required = ["ARK_API_KEY", "APIMART_API_KEY", "TOS_ACCESS_KEY_ID", "TOS_SECRET_ACCESS_KEY"]
     missing = [key for key in required if not private_config_value(key)]
     if missing:
-        print(f"warning: missing private config values: {', '.join(missing)}. Packaged app may require these features to be configured.")
+        raise SystemExit(f"缺少打包必需配置：{', '.join(missing)}。请在 GitHub Secrets 或 private_config.json 中配置。")
 
 
 def private_config_value(key: str, default: str = "") -> str:
@@ -161,6 +161,8 @@ def main() -> None:
     sep = ";" if os.name == "nt" else ":"
     add_data = f"static{sep}static"
     private_config_data = f"private_config.json{sep}."
+    package_data = f"package.json{sep}."
+    tauri_config_data = f"src-tauri/tauri.conf.json{sep}src-tauri"
     command = [
         pyinstaller,
         "--clean",
@@ -171,6 +173,10 @@ def main() -> None:
         add_data,
         "--add-data",
         private_config_data,
+        "--add-data",
+        package_data,
+        "--add-data",
+        tauri_config_data,
     ]
     if os.name == "nt":
         command.append("--noconsole")
