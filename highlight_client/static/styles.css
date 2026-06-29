@@ -839,6 +839,11 @@ button:hover {
   line-height: 1.45;
 }
 
+#storySummary:empty {
+  min-height: 0;
+  margin-bottom: 0;
+}
+
 .insights {
   display: grid;
   gap: 8px;
@@ -1225,6 +1230,47 @@ button:hover {
   word-break: break-all;
 }
 
+.storyCreatePanel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid #d8ddd4;
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.storyCreatePrompt {
+  min-width: 0;
+}
+
+.storyCreatePrompt textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+
+.storyCreateActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.storyCreateActions input {
+  width: 82px;
+  height: var(--control-compact);
+  min-height: var(--control-compact);
+}
+
+.storyCreateActions button {
+  height: var(--control-compact);
+  min-height: var(--control-compact);
+  font-size: var(--text-sm);
+}
+
 .referencePanel {
   display: grid;
   gap: 8px;
@@ -1243,13 +1289,22 @@ button:hover {
 }
 
 .referenceHead strong {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
   color: #1d2522;
   font-size: var(--text-base);
 }
 
 .referenceHead strong span {
-  margin-left: 6px;
   color: #607069;
+  font-weight: 500;
+}
+
+.referenceHead strong small {
+  color: #607069;
+  font-size: var(--text-xs);
   font-weight: 500;
 }
 
@@ -1357,6 +1412,8 @@ button:hover {
 }
 
 .referenceCardHead strong {
+  display: block;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   color: #1d2522;
@@ -1482,19 +1539,7 @@ button:hover {
   resize: vertical;
 }
 
-.storyVideoDefaults {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  align-items: center;
-  margin-bottom: 10px;
-  padding: 9px 10px;
-  border: 1px solid #d8ddd4;
-  border-radius: 8px;
-  background: #fbfcfa;
-}
-
-.storyVideoReferencePanel {
+.storyVideoPanel {
   display: grid;
   gap: 8px;
   margin-bottom: 10px;
@@ -1504,8 +1549,37 @@ button:hover {
   background: #fbfcfa;
 }
 
-.videoReferenceActions {
-  justify-content: flex-start;
+.storyVideoPanelHead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.storyVideoPanelHead strong {
+  color: #1d2522;
+  font-size: var(--text-base);
+}
+
+.storyVideoControls {
+  justify-content: flex-end;
+}
+
+.storyVideoControls input:not([type="checkbox"]) {
+  width: 64px;
+  height: var(--control-compact);
+  min-height: var(--control-compact);
+  padding: 3px 8px;
+  font-size: var(--text-sm);
+}
+
+.storyVideoControls input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  flex: 0 0 auto;
 }
 
 .videoReferenceList {

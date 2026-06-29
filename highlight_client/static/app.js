@@ -62,6 +62,8 @@ const seedanceAudio = $("seedanceAudio");
 const applyStoryVideoDefaultsBtn = $("applyStoryVideoDefaultsBtn");
 const storyboardOutputDir = $("storyboardOutputDir");
 const storyboardModelMode = $("storyboardModelMode");
+const storyboardCreateRequirement = $("storyboardCreateRequirement");
+const storyboardCreateDuration = $("storyboardCreateDuration");
 const ffmpegPath = $("ffmpegPath");
 const downloadRetentionDays = $("downloadRetentionDays");
 const douyinCookie = $("douyinCookie");
@@ -98,6 +100,7 @@ let bgms = [];
 let focusMarks = [];
 let storyboardShots = [];
 let storyboardSummary = "";
+let storyboardSourceName = "";
 let storyboardRefs = [];
 let storyVideoRefs = [];
 let historyItems = [];
@@ -107,6 +110,10 @@ let authPollTimer = 0;
 let sessionCheckTimer = 0;
 let wecomLoginInstance = null;
 let autoUpdateChecked = false;
+
+function isCreativeStoryboardSource() {
+  return storyboardSourceName === "创作分镜脚本";
+}
 
 const ROLE_LABELS = {
   hook: "开头钩子",
@@ -547,7 +554,7 @@ function renderStoryboardRefs() {
   storyboardRefCount.textContent = `${storyboardRefs.length}/16`;
   if (!storyboardRefs.length) {
     storyboardRefsList.className = "referenceList empty";
-    storyboardRefsList.textContent = "可上传图片，也可让 AI 从分镜脚本中生成参考图，最多 16 张。";
+    storyboardRefsList.textContent = "";
     return;
   }
   storyboardRefsList.className = "referenceList";
@@ -813,6 +820,7 @@ function renderHistory() {
       }
       if (Array.isArray(item.storyboard) && item.storyboard.length) {
         storyboardShots = item.storyboard;
+        storyboardSourceName = item.sourceName || item.videoName || "历史分镜脚本";
         renderStoryboard(item.summary || "历史分镜脚本已载入。");
         switchContentTab("storyboard");
       }
@@ -939,6 +947,7 @@ function resetVideoDerivedState() {
   clips = [];
   storyboardShots = [];
   storyboardSummary = "";
+  storyboardSourceName = "";
   storyboardRefs = [];
   storyVideoRefs = [];
   stickers = [];
@@ -1026,7 +1035,7 @@ async function enterAppAfterLogin(user = {}) {
   if (configNeedsSetup(config)) {
     openSettings();
   }
-  loadHistory();
+  await loadHistory();
   scheduleAutoUpdateCheck();
 }
 
@@ -2047,7 +2056,34 @@ $("storyboardBtn").addEventListener("click", async () => {
       modelMode: storyboardModelMode ? storyboardModelMode.value : "fast",
     }, (data) => {
       storyboardShots = data.shots || [];
+      storyboardSourceName = videoPath.value ? "" : "视频分镜脚本";
       renderStoryboard(data.summary || `已生成 ${storyboardShots.length} 个分镜。`);
+      loadHistory();
+    });
+  } catch (error) {
+    storySummary.textContent = error.message;
+  }
+});
+
+$("storyboardCreateBtn").addEventListener("click", async () => {
+  switchContentTab("storyboard");
+  const requirement = storyboardCreateRequirement.value.trim();
+  const duration = Math.max(10, Math.min(180, Number(storyboardCreateDuration.value || 60)));
+  if (!requirement) {
+    storySummary.textContent = "请先输入短视频创作要求。";
+    storyboardCreateRequirement.focus();
+    return;
+  }
+  storySummary.textContent = "正在根据创作要求生成分镜脚本...";
+  try {
+    await runTask("/api/storyboard-create", {
+      requirement,
+      duration,
+      modelMode: storyboardModelMode ? storyboardModelMode.value : "fast",
+    }, (data) => {
+      storyboardShots = data.shots || [];
+      storyboardSourceName = data.sourceName || "创作分镜脚本";
+      renderStoryboard(data.summary || `已创作 ${storyboardShots.length} 个分镜。`);
       loadHistory();
     });
   } catch (error) {
@@ -2222,9 +2258,10 @@ $("mergeStoryboardVideosBtn").addEventListener("click", async () => {
   storySummary.textContent = "正在合并分镜视频...";
   try {
     const data = await post("/api/storyboard-merge-videos", {
-      path: videoPath.value,
+      path: isCreativeStoryboardSource() ? "" : videoPath.value,
       outputDir: storyboardOutputDir.value,
       shots: storyboardPayload(),
+      sourceName: storyboardSourceName || "创作分镜脚本",
     });
     rememberStoryboardOutputDir();
     storySummary.innerHTML = `合并完成：<code>${escapeHtml(data.path)}</code>`;
@@ -2239,9 +2276,10 @@ $("exportStoryboardVideosBtn").addEventListener("click", async () => {
   storySummary.textContent = "正在导出分镜视频...";
   try {
     const data = await post("/api/storyboard-export-videos", {
-      path: videoPath.value,
+      path: isCreativeStoryboardSource() ? "" : videoPath.value,
       outputDir: storyboardOutputDir.value,
       shots: storyboardPayload(),
+      sourceName: storyboardSourceName || "创作分镜脚本",
     });
     rememberStoryboardOutputDir();
     storySummary.innerHTML = `已导出 ${data.count} 个分镜视频：<code>${escapeHtml(data.outputDir)}</code>`;
@@ -2257,9 +2295,10 @@ $("exportStoryboardBtn").addEventListener("click", async () => {
   storySummary.textContent = "正在导出分镜脚本...";
   try {
     const data = await post("/api/export-storyboard", {
-      path: videoPath.value,
+      path: isCreativeStoryboardSource() ? "" : videoPath.value,
       summary: summaryToExport,
       shots: storyboardPayload(),
+      sourceName: storyboardSourceName || "创作分镜脚本",
     });
     rememberOutputDir();
     storySummary.innerHTML = `分镜脚本已导出：<code>${escapeHtml(data.path)}</code>`;

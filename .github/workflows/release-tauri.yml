@@ -36,6 +36,9 @@ jobs:
       - name: Install npm deps
         run: npm install
 
+      - name: Install ffmpeg tools
+        run: brew install ffmpeg
+
       - name: Build sidecar
         run: python scripts/build_sidecar.py
         env:
@@ -98,6 +101,10 @@ jobs:
 
       - name: Install npm deps
         run: npm install
+
+      - name: Install ffmpeg tools
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
 
       - name: Build sidecar
         run: python scripts/build_sidecar.py

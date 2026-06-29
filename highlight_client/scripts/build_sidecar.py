@@ -46,16 +46,16 @@ def target_triple() -> str:
 
 
 def ensure_private_config() -> None:
-    if PRIVATE_CONFIG.exists():
-        return
     config = {}
-    if PRIVATE_CONFIG_SAMPLE.exists():
+    for source in (PRIVATE_CONFIG_SAMPLE, PRIVATE_CONFIG):
+        if not source.exists():
+            continue
         try:
-            loaded = json.loads(PRIVATE_CONFIG_SAMPLE.read_text(encoding="utf-8"))
+            loaded = json.loads(source.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
-                config.update(loaded)
+                config.update({key: value for key, value in loaded.items() if value not in {"", None}})
         except Exception:
-            pass
+            continue
     for key in (
         "ARK_API_KEY",
         "APIMART_API_KEY",
@@ -82,6 +82,13 @@ def ensure_private_config() -> None:
     PRIVATE_CONFIG.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def ensure_required_private_config() -> None:
+    required = ["ARK_API_KEY", "APIMART_API_KEY", "TOS_ACCESS_KEY_ID", "TOS_SECRET_ACCESS_KEY"]
+    missing = [key for key in required if not private_config_value(key)]
+    if missing:
+        print(f"warning: missing private config values: {', '.join(missing)}. Packaged app may require these features to be configured.")
+
+
 def private_config_value(key: str, default: str = "") -> str:
     if os.environ.get(key, "").strip():
         return os.environ[key].strip()
@@ -100,6 +107,16 @@ def private_config_value(key: str, default: str = "") -> str:
 
 def truthy(value: str) -> bool:
     return str(value or "").strip().lower() not in {"0", "false", "no", "off", "否"}
+
+
+def detect_ffprobe() -> Path | None:
+    env_value = os.environ.get("FFPROBE_PATH", "").strip()
+    if env_value and Path(env_value).exists():
+        return Path(env_value)
+    found = shutil.which("ffprobe.exe" if os.name == "nt" else "ffprobe") or shutil.which("ffprobe")
+    if found:
+        return Path(found)
+    return None
 
 
 def ensure_whisper_model() -> Path | None:
@@ -138,6 +155,7 @@ def main() -> None:
         raise SystemExit("找不到 pyinstaller。请先运行：python -m pip install pyinstaller")
 
     ensure_private_config()
+    ensure_required_private_config()
     whisper_model = ensure_whisper_model()
     TAURI_BIN.mkdir(parents=True, exist_ok=True)
     sep = ";" if os.name == "nt" else ":"
@@ -154,6 +172,16 @@ def main() -> None:
         "--add-data",
         private_config_data,
     ]
+    if os.name == "nt":
+        command.append("--noconsole")
+    ffprobe = detect_ffprobe()
+    if ffprobe:
+        command.extend([
+            "--add-binary",
+            f"{ffprobe}{sep}ffmpeg-tools",
+        ])
+    else:
+        print("warning: ffprobe not found; packaged app will fall back to ffmpeg/mp4 parser.")
     if whisper_model:
         command.extend([
             "--add-data",

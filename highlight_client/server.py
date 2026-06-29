@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import base64
@@ -162,7 +163,21 @@ def save_config(config: dict) -> None:
 
 def load_private_config() -> dict:
     merged: dict = {}
-    for candidate in (BUNDLED_PRIVATE_CONFIG_FILE, PRIVATE_CONFIG_FILE):
+    candidates = [
+        DEV_ROOT / "private_config.json",
+        RESOURCE_ROOT / "private_config.json",
+        Path(getattr(sys, "executable", "")).resolve().parent / "private_config.json",
+        PRIVATE_CONFIG_FILE,
+    ]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            candidate = candidate.resolve()
+        except Exception:
+            pass
+        if candidate in seen:
+            continue
+        seen.add(candidate)
         if not candidate.exists():
             continue
         try:
@@ -837,15 +852,22 @@ def ffmpeg_path() -> str:
 
 
 def ffprobe_path() -> str | None:
+    ffprobe_name = "ffprobe.exe" if is_windows() else "ffprobe"
     candidates = []
+    candidates.append(str(RESOURCE_ROOT / "ffmpeg-tools" / ffprobe_name))
+    candidates.append(str(DEV_ROOT / "ffmpeg-tools" / ffprobe_name))
+    try:
+        candidates.append(str(Path(getattr(sys, "executable", "")).resolve().parent / "ffmpeg-tools" / ffprobe_name))
+    except Exception:
+        pass
     configured = load_config().get("ffmpegPath", "")
     if configured:
         ffmpeg = Path(configured)
-        candidates.append(str(ffmpeg.with_name("ffprobe.exe" if ffmpeg.suffix.lower() == ".exe" else "ffprobe")))
+        candidates.append(str(ffmpeg.with_name(ffprobe_name)))
     detected = detect_ffmpeg_path()
     if detected:
         ffmpeg = Path(detected)
-        candidates.append(str(ffmpeg.with_name("ffprobe.exe" if ffmpeg.suffix.lower() == ".exe" else "ffprobe")))
+        candidates.append(str(ffmpeg.with_name(ffprobe_name)))
     candidates.append("ffprobe")
     for candidate in candidates:
         if Path(candidate).is_file() or shutil.which(candidate):
@@ -1766,6 +1788,218 @@ def parse_media_info(stderr: object) -> dict:
             after = text.split("Audio:", 1)[1].strip()
             pieces = [item.strip() for item in after.split(",")]
             info["audio"] = ", ".join(pieces[:3])
+    return info
+
+
+def parse_fraction_rate(value: object) -> float:
+    text = str(value or "").strip()
+    if not text or text == "0/0":
+        return 0.0
+    try:
+        if "/" in text:
+            left, right = text.split("/", 1)
+            denominator = float(right)
+            return float(left) / denominator if denominator else 0.0
+        return float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def fps_label(value: object) -> str:
+    rate = parse_fraction_rate(value)
+    if rate <= 0:
+        return "未知"
+    if abs(rate - round(rate)) < 0.02:
+        return f"{round(rate)} fps"
+    return f"{rate:.2f} fps"
+
+
+def bitrate_label(value: object) -> str:
+    try:
+        bitrate = int(float(value))
+    except (TypeError, ValueError):
+        return "未知"
+    if bitrate <= 0:
+        return "未知"
+    if bitrate >= 1_000_000:
+        return f"{bitrate / 1_000_000:.2f} Mb/s"
+    return f"{bitrate / 1000:.0f} kb/s"
+
+
+def ratio_label(width: int, height: int, stream: dict) -> str:
+    display_ratio = str(stream.get("display_aspect_ratio") or "").strip()
+    if display_ratio and display_ratio not in {"N/A", "0:1"}:
+        return display_ratio
+    if width <= 0 or height <= 0:
+        return "未知"
+    divisor = math.gcd(width, height)
+    return f"{width // divisor}:{height // divisor}" if divisor else "未知"
+
+
+def ffprobe_media_info(video: Path) -> dict | None:
+    probe = ffprobe_path()
+    if not probe:
+        return None
+    try:
+        result = run([
+            probe,
+            "-v", "error",
+            "-show_entries",
+            "format=duration,bit_rate:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,display_aspect_ratio,bit_rate",
+            "-of", "json",
+            str(video),
+        ], timeout=60)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+
+    streams = data.get("streams") or []
+    video_stream = next((item for item in streams if item.get("codec_type") == "video"), None)
+    audio_stream = next((item for item in streams if item.get("codec_type") == "audio"), None)
+    format_info = data.get("format") or {}
+    if not video_stream and not audio_stream and not format_info:
+        return None
+
+    try:
+        duration_seconds = float(format_info.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+    width = int(video_stream.get("width") or 0) if video_stream else 0
+    height = int(video_stream.get("height") or 0) if video_stream else 0
+    display_width, display_height = video_display_size(video, (width or 16, height or 9)) if video_stream else (0, 0)
+    resolution = f"{display_width}x{display_height}" if display_width and display_height else "未知"
+    frame_rate = (video_stream or {}).get("avg_frame_rate") or (video_stream or {}).get("r_frame_rate")
+
+    return {
+        "duration": seconds_to_clock(duration_seconds) if duration_seconds > 0 else "未知",
+        "durationSeconds": duration_seconds,
+        "video": str(video_stream.get("codec_name") or "未检测到") if video_stream else "未检测到",
+        "audio": str(audio_stream.get("codec_name") or "未检测到") if audio_stream else "未检测到",
+        "resolution": resolution,
+        "ratio": ratio_label(display_width, display_height, video_stream or {}),
+        "fps": fps_label(frame_rate),
+        "bitrate": bitrate_label(format_info.get("bit_rate") or (video_stream or {}).get("bit_rate")),
+    }
+
+
+MP4_CONTAINER_ATOMS = {
+    "moov", "trak", "mdia", "minf", "stbl", "edts", "dinf", "udta", "meta", "ilst",
+}
+
+
+def mp4_atom_media_info(video: Path) -> dict | None:
+    if video.suffix.lower() not in {".mp4", ".m4v", ".mov"}:
+        return None
+    try:
+        file_size = video.stat().st_size
+    except OSError:
+        return None
+    state: dict[str, object] = {"duration": 0.0, "sizes": []}
+
+    def parse_mvhd(payload: bytes) -> None:
+        if len(payload) < 20:
+            return
+        version = payload[0]
+        try:
+            if version == 1 and len(payload) >= 32:
+                timescale = int.from_bytes(payload[20:24], "big")
+                duration = int.from_bytes(payload[24:32], "big")
+            else:
+                timescale = int.from_bytes(payload[12:16], "big")
+                duration = int.from_bytes(payload[16:20], "big")
+            if timescale > 0 and duration > 0:
+                state["duration"] = max(float(state.get("duration") or 0), duration / timescale)
+        except Exception:
+            return
+
+    def parse_atoms(handle, start: int, end: int, depth: int = 0) -> None:
+        if depth > 8:
+            return
+        position = start
+        while position + 8 <= end:
+            try:
+                handle.seek(position)
+                header = handle.read(8)
+            except OSError:
+                return
+            if len(header) < 8:
+                return
+            size = int.from_bytes(header[:4], "big")
+            atom_type = header[4:8].decode("latin1", errors="ignore")
+            header_size = 8
+            if size == 1:
+                extended = handle.read(8)
+                if len(extended) < 8:
+                    return
+                size = int.from_bytes(extended, "big")
+                header_size = 16
+            elif size == 0:
+                size = end - position
+            atom_end = position + size
+            if size < header_size or atom_end > end or atom_end <= position:
+                return
+            payload_start = position + header_size
+            payload_size = atom_end - payload_start
+            try:
+                if atom_type == "mvhd":
+                    handle.seek(payload_start)
+                    parse_mvhd(handle.read(min(payload_size, 128)))
+                elif atom_type == "tkhd" and payload_size >= 8:
+                    handle.seek(atom_end - 8)
+                    fixed = handle.read(8)
+                    if len(fixed) == 8:
+                        width = int.from_bytes(fixed[:4], "big") / 65536
+                        height = int.from_bytes(fixed[4:], "big") / 65536
+                        if width >= 16 and height >= 16:
+                            state.setdefault("sizes", []).append((round(width), round(height)))
+                elif atom_type in MP4_CONTAINER_ATOMS:
+                    parse_atoms(handle, payload_start, atom_end, depth + 1)
+            except OSError:
+                return
+            position = atom_end
+
+    try:
+        with video.open("rb") as handle:
+            parse_atoms(handle, 0, file_size)
+    except OSError:
+        return None
+
+    sizes = [item for item in state.get("sizes", []) if isinstance(item, tuple)]
+    width, height = max(sizes, key=lambda item: item[0] * item[1]) if sizes else (0, 0)
+    try:
+        duration_seconds = float(state.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+    if duration_seconds <= 0 and not (width and height):
+        return None
+    bitrate = int(file_size * 8 / duration_seconds) if duration_seconds > 0 else 0
+    return {
+        "duration": seconds_to_clock(duration_seconds) if duration_seconds > 0 else "未知",
+        "durationSeconds": duration_seconds,
+        "video": video.suffix.lower().lstrip(".") or "mp4",
+        "audio": "未检测到",
+        "resolution": f"{width}x{height}" if width and height else "未知",
+        "ratio": ratio_label(width, height, {}),
+        "fps": "未知",
+        "bitrate": bitrate_label(bitrate),
+    }
+
+
+def probe_media_info(video: Path) -> dict:
+    info = ffprobe_media_info(video)
+    if info:
+        return info
+    info = mp4_atom_media_info(video)
+    if info:
+        return info
+    result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
+    info = parse_media_info(result.stderr)
+    info["durationSeconds"] = parse_duration_seconds(result.stderr)
     return info
 
 
@@ -2936,6 +3170,73 @@ def analyze_ai_storyboard(video: Path, requirement: str = "", task_id: str | Non
     }
 
 
+def clamp_storyboard_creation_duration(value: object) -> float:
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        duration = 60.0
+    return max(10.0, min(180.0, duration))
+
+
+def creative_storyboard_prompt(requirement: str, duration: float) -> dict:
+    return {
+        "task": "根据用户创作要求，直接创作一个可执行的中文短视频分镜脚本。请只返回严格 JSON，不要输出解释文字。",
+        "target_duration": round(duration, 1),
+        "user_requirement": requirement,
+        "writing_rule": (
+            "分镜要能直接进入后续生图和生视频流程。镜头按顺序连贯推进，人物、场景、视觉风格、声音风格保持一致。"
+            "每个镜头只写该镜头对应的台词，不要把同一句台词复制到多个镜头；没有台词就留空。"
+            "单个镜头时长根据内容决定，但不得超过15秒；总时长尽量接近 target_duration。"
+            "画面描述要具体到主体、场景、动作、构图、情绪和关键视觉元素。"
+            "caption 只写需要出现在画面上的字幕/花字/卖点文字，不要和 dialogue 混在一起。"
+            "edit 写节奏、转场、音效或镜头衔接建议，保证最终几段视频可直接按顺序合并成完整短视频。"
+        ),
+        "output_schema": {
+            "shots": [{
+                "shot": "镜号",
+                "start": "开始秒数",
+                "end": "结束秒数",
+                "scene": "画面描述",
+                "shotType": "景别，如特写/近景/中景/全景",
+                "camera": "运镜或镜头调度",
+                "action": "人物/商品/画面动作",
+                "dialogue": "该镜头真实口播/对白，没有则空字符串",
+                "caption": "建议字幕/花字/画面重点文字，没有则空字符串",
+                "edit": "剪辑节奏、转场或音效建议",
+            }],
+            "summary": "中文总结这个短视频的创作逻辑、风格和成片方向",
+        },
+    }
+
+
+def create_ai_storyboard(requirement: str, duration: float = 60.0, task_id: str | None = None, model_mode: str = "fast") -> dict:
+    requirement = safe_text(requirement).strip()[:3000]
+    if not requirement:
+        raise RuntimeError("请先输入短视频创作要求。")
+    duration = clamp_storyboard_creation_duration(duration)
+    if task_id:
+        task_update(task_id, 15, "正在理解创作要求")
+    content = [{
+        "type": "text",
+        "text": json.dumps(creative_storyboard_prompt(requirement, duration), ensure_ascii=False),
+    }]
+    if task_id:
+        task_update(task_id, 45, "正在调用豆包创作分镜脚本")
+    ai = parse_ai_json(call_ark_chat(content, task_id=task_id, model_mode=model_mode))
+    if task_id:
+        task_update(task_id, 90, "正在整理创作分镜")
+    shots = normalize_storyboard(ai.get("shots") or ai.get("storyboard") or [], duration)
+    if not shots:
+        raise RuntimeError("AI 没有返回可用的创作分镜，请补充更具体的创作要求后重试。")
+    shots = dedupe_storyboard_dialogues(shots)
+    return {
+        "shots": shots,
+        "summary": ai.get("summary") or f"已根据创作要求生成 {len(shots)} 个分镜。",
+        "duration": seconds_to_clock(duration),
+        "sourceName": "创作分镜脚本",
+    }
+
+
 def storyboard_image_prompt(shot: dict, index: int, reference_notes: str = "") -> str:
     parts = [
         "请生成一张适合短视频广告分镜的高清画面，真实商业摄影质感，主体清晰，构图干净，可直接作为视频首帧。",
@@ -3702,13 +4003,14 @@ def choose_folder() -> str:
     return choose_with_tkinter(kind="folder")
 
 
-def default_storyboard_name(video: Path) -> str:
-    base = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", video.stem, flags=re.UNICODE).strip("._") or "video"
+def default_storyboard_name(video: Path | None = None, source_name: str = "") -> str:
+    raw_name = video.stem if video else source_name
+    base = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", raw_name or "创作分镜脚本", flags=re.UNICODE).strip("._") or "storyboard"
     return f"{base}_storyboard.md"
 
 
-def choose_storyboard_output(video: Path) -> str:
-    default_name = default_storyboard_name(video)
+def choose_storyboard_output(video: Path | None = None, source_name: str = "") -> str:
+    default_name = default_storyboard_name(video, source_name)
     if is_macos():
         script = f'POSIX path of (choose file name with prompt "保存分镜脚本" default name "{default_name}")'
         result = run(["osascript", "-e", script], timeout=120)
@@ -3985,11 +4287,21 @@ def has_audio_stream(video: Path) -> bool:
 
 
 def media_duration_seconds(video: Path) -> float:
+    info = ffprobe_media_info(video) or mp4_atom_media_info(video)
+    if info:
+        try:
+            return float(info.get("durationSeconds") or 0)
+        except (TypeError, ValueError):
+            pass
     result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
     return parse_duration_seconds(result.stderr)
 
 
 def media_pixel_size(video: Path) -> tuple[int, int]:
+    info = ffprobe_media_info(video) or mp4_atom_media_info(video) or {}
+    match = re.search(r"(\d+)x(\d+)", str(info.get("resolution") or ""))
+    if match:
+        return int(match.group(1)), int(match.group(2))
     result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=60)
     info = parse_media_info(result.stderr)
     match = re.search(r"(\d+)x(\d+)", str(info.get("resolution") or ""))
@@ -4033,8 +4345,23 @@ def clean_storyboard_summary(summary: str) -> str:
     return "" if value in blocked else value
 
 
-def export_storyboard_file(video: Path, output_path: Path, summary: str, shots: object) -> Path:
-    normalized = normalize_storyboard(shots, max(1.0, media_duration_seconds(video)))
+def storyboard_duration_from_shots(shots: object) -> float:
+    if not isinstance(shots, list):
+        return 60.0
+    ends = []
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        try:
+            ends.append(float(shot.get("end", 0)))
+        except (TypeError, ValueError):
+            continue
+    return max(1.0, max(ends) if ends else 60.0)
+
+
+def export_storyboard_file(video: Path | None, output_path: Path, summary: str, shots: object, source_name: str = "") -> Path:
+    duration = max(1.0, media_duration_seconds(video)) if video and video.exists() else storyboard_duration_from_shots(shots)
+    normalized = normalize_storyboard(shots, duration)
     if not normalized:
         raise RuntimeError("请先生成分镜脚本，再导出。")
     output = output_path.expanduser()
@@ -4042,12 +4369,16 @@ def export_storyboard_file(video: Path, output_path: Path, summary: str, shots: 
         output = output.with_suffix(".md")
     output.parent.mkdir(parents=True, exist_ok=True)
     summary = clean_storyboard_summary(summary)
+    title = video.stem if video and video.exists() else (source_name.strip() or "创作分镜脚本")
     lines = [
-        f"# {video.stem} 分镜脚本",
+        f"# {title} 分镜脚本",
         "",
         f"- 生成时间：{now_text()}",
-        f"- 原视频：{video.name}",
     ]
+    if video and video.exists():
+        lines.append(f"- 原视频：{video.name}")
+    else:
+        lines.append("- 来源：直接创作")
     if summary:
         lines.extend(["", f"## 总结", "", str(summary).strip()])
     lines.extend([
@@ -4309,11 +4640,19 @@ def generated_storyboard_videos(shots_raw: object) -> list[tuple[int, Path]]:
     return videos
 
 
-def export_storyboard_video_files(video: Path, output_dir: Path, shots_raw: object) -> list[dict]:
+def storyboard_output_base(video: Path | None, source_name: str = "") -> Path:
+    if video and video.exists():
+        return video
+    safe_name = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", source_name or "创作分镜脚本", flags=re.UNICODE).strip("._") or "storyboard"
+    return Path(safe_name)
+
+
+def export_storyboard_video_files(video: Path | None, output_dir: Path, shots_raw: object, source_name: str = "") -> list[dict]:
+    base = storyboard_output_base(video, source_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     exported = []
     for index, source in generated_storyboard_videos(shots_raw):
-        output = output_name_for(video, f"story_{index}", output_dir)
+        output = output_name_for(base, f"story_{index}", output_dir)
         shutil.copy2(source, output)
         exported.append({
             "path": str(output),
@@ -4323,10 +4662,11 @@ def export_storyboard_video_files(video: Path, output_dir: Path, shots_raw: obje
     return exported
 
 
-def merge_storyboard_video_files(video: Path, output_dir: Path, shots_raw: object) -> Path:
+def merge_storyboard_video_files(video: Path | None, output_dir: Path, shots_raw: object, source_name: str = "") -> Path:
     videos = generated_storyboard_videos(shots_raw)
+    base = storyboard_output_base(video, source_name)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_name_for(video, "story_final", output_dir)
+    output = output_name_for(base, "story_final", output_dir)
     target_width, target_height = media_pixel_size(videos[0][1])
     target_width = max(2, target_width // 2 * 2)
     target_height = max(2, target_height // 2 * 2)
@@ -4395,7 +4735,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/static/"):
             file_path = STATIC / path.removeprefix("/static/")
-            content_type = "text/css" if file_path.suffix == ".css" else "application/javascript"
+            content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
             self.send_static(file_path, content_type)
             return
         if path.startswith("/work/"):
@@ -4495,8 +4835,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not video.exists():
                     response(self, 400, {"error": "视频文件不存在。"})
                     return
-                result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=30)
-                response(self, 200, {"info": parse_media_info(result.stderr), "raw": result.stderr})
+                response(self, 200, {"info": probe_media_info(video)})
                 return
 
             if self.path == "/api/pick-file":
@@ -4702,17 +5041,37 @@ class Handler(BaseHTTPRequestHandler):
                 response(self, 200, {"taskId": task_id})
                 return
 
+            if self.path == "/api/storyboard-create":
+                payload = read_json(self)
+                requirement = str(payload.get("requirement", "")).strip()[:3000]
+                duration = clamp_storyboard_creation_duration(payload.get("duration"))
+                model_mode = "precise"
+                if not requirement:
+                    response(self, 400, {"error": "请先输入短视频创作要求。"})
+                    return
+                notify_feature_used("创作分镜脚本", f"模型：Doubao-Seed-2.1 Turbo，预计时长：{duration:g} 秒，要求：{requirement[:500]}")
+                def worker(tid: str) -> dict:
+                    result = create_ai_storyboard(requirement, duration=duration, task_id=tid, model_mode=model_mode)
+                    append_history("创作分镜脚本", None, summary=result.get("summary", ""), duration=result.get("duration", ""), requirement=requirement, storyboard=result.get("shots", [])[:24], modelMode=model_mode, sourceName=result.get("sourceName", "创作分镜脚本"))
+                    return result
+                task_id = start_task("创作分镜脚本", worker)
+                response(self, 200, {"taskId": task_id})
+                return
+
             if self.path == "/api/export-storyboard":
                 payload = read_json(self)
-                video = Path(payload.get("path", "")).expanduser()
+                raw_path = str(payload.get("path", "")).strip()
+                video = Path(raw_path).expanduser() if raw_path else None
                 summary = str(payload.get("summary", "")).strip()[:2000]
                 shots = payload.get("shots", [])
-                if not video.exists():
+                source_name = str(payload.get("sourceName", "")).strip()[:80] or "创作分镜脚本"
+                if raw_path and (not video or not video.exists()):
                     response(self, 400, {"error": "视频文件不存在。"})
                     return
-                output = export_storyboard_file(video, Path(choose_storyboard_output(video)), summary, shots)
+                output = export_storyboard_file(video, Path(choose_storyboard_output(video, source_name)), summary, shots, source_name=source_name)
                 reveal_in_finder(output)
-                notify_feature_used("导出分镜脚本", f"视频：{video.name}，镜头数：{len(shots) if isinstance(shots, list) else 0}")
+                target_name = video.name if video and video.exists() else source_name
+                notify_feature_used("导出分镜脚本", f"来源：{target_name}，镜头数：{len(shots) if isinstance(shots, list) else 0}")
                 response(self, 200, {"path": str(output), "count": len(shots) if isinstance(shots, list) else 0})
                 return
 
@@ -4850,32 +5209,38 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/storyboard-export-videos":
                 payload = read_json(self)
-                video = Path(payload.get("path", "")).expanduser()
+                raw_path = str(payload.get("path", "")).strip()
+                video = Path(raw_path).expanduser() if raw_path else None
                 output_dir = Path(payload.get("outputDir") or str(EXPORTS)).expanduser()
                 shots = payload.get("shots", [])
-                if not video.exists():
+                source_name = str(payload.get("sourceName", "")).strip()[:80] or "创作分镜脚本"
+                if raw_path and (not video or not video.exists()):
                     response(self, 400, {"error": "视频文件不存在。"})
                     return
                 output_dir.mkdir(parents=True, exist_ok=True)
-                exported = export_storyboard_video_files(video, output_dir, shots)
+                exported = export_storyboard_video_files(video, output_dir, shots, source_name=source_name)
                 reveal_in_finder(Path(exported[0]["path"]))
-                notify_feature_used("导出分镜视频", f"视频：{video.name}，数量：{len(exported)}")
-                append_history("导出分镜视频", video, summary=f"导出 {len(exported)} 个分镜视频", outputDir=str(output_dir), segments=exported[:12])
+                target_name = video.name if video and video.exists() else source_name
+                notify_feature_used("导出分镜视频", f"来源：{target_name}，数量：{len(exported)}")
+                append_history("导出分镜视频", video if video and video.exists() else None, summary=f"导出 {len(exported)} 个分镜视频", outputDir=str(output_dir), segments=exported[:12], sourceName=target_name)
                 response(self, 200, {"segments": exported, "count": len(exported), "outputDir": str(output_dir)})
                 return
 
             if self.path == "/api/storyboard-merge-videos":
                 payload = read_json(self)
-                video = Path(payload.get("path", "")).expanduser()
+                raw_path = str(payload.get("path", "")).strip()
+                video = Path(raw_path).expanduser() if raw_path else None
                 output_dir = Path(payload.get("outputDir") or str(EXPORTS)).expanduser()
                 shots = payload.get("shots", [])
-                if not video.exists():
+                source_name = str(payload.get("sourceName", "")).strip()[:80] or "创作分镜脚本"
+                if raw_path and (not video or not video.exists()):
                     response(self, 400, {"error": "视频文件不存在。"})
                     return
-                output = merge_storyboard_video_files(video, output_dir, shots)
+                output = merge_storyboard_video_files(video, output_dir, shots, source_name=source_name)
                 reveal_in_finder(output)
-                notify_feature_used("合并分镜视频", f"视频：{video.name}，镜头数：{len(generated_storyboard_videos(shots))}")
-                append_history("合并分镜视频", video, summary="按分镜顺序合并视频片段", output=str(output))
+                target_name = video.name if video and video.exists() else source_name
+                notify_feature_used("合并分镜视频", f"来源：{target_name}，镜头数：{len(generated_storyboard_videos(shots))}")
+                append_history("合并分镜视频", video if video and video.exists() else None, summary="按分镜顺序合并视频片段", output=str(output), sourceName=target_name)
                 response(self, 200, {"path": str(output), "outputDir": str(output_dir)})
                 return
 

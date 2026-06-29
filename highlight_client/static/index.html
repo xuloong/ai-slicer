@@ -105,9 +105,23 @@
             </div>
           </div>
           <div id="storySummary" class="note"></div>
+          <div class="storyCreatePanel">
+            <label class="field storyCreatePrompt">
+              <span>直接创作分镜脚本</span>
+              <textarea id="storyboardCreateRequirement" rows="2" placeholder="输入产品卖点、目标人群、剧情方向、口播风格、期望节奏等。生成后可继续生成分镜图和分镜视频。"></textarea>
+            </label>
+            <div class="storyCreateActions">
+              <label class="inline">
+                <span>预计时长</span>
+                <input id="storyboardCreateDuration" type="number" min="10" max="180" value="60">
+                <span>秒</span>
+              </label>
+              <button id="storyboardCreateBtn" type="button">创作分镜脚本</button>
+            </div>
+          </div>
           <div class="referencePanel">
             <div class="referenceHead">
-              <strong>分镜图参考图 <span id="storyboardRefCount">0/16</span></strong>
+              <strong>分镜图参考图 <span id="storyboardRefCount">0/16</span><small>可上传图片，也可让 AI 从分镜脚本中生成参考图，最多 16 张。</small></strong>
               <div class="referenceActions">
                 <label class="inline">
                   <span>比例</span>
@@ -146,58 +160,59 @@
               <span>参考图</span>
               <button id="clearStoryboardRefsBtn" type="button">清空参考图</button>
             </div>
-            <div id="storyboardRefsList" class="referenceList empty">可上传人物、场景、商品或风格参考图，最多 16 张。</div>
+            <div id="storyboardRefsList" class="referenceList empty"></div>
             <label class="field referenceDescription">
               <span>参考图说明</span>
               <textarea id="storyboardRefDescription" rows="3" placeholder="例如：第1张是女主形象，第2张是男主形象，第3张是客厅场景，第4张是产品外观。生成时保持人物、场景和风格一致。"></textarea>
             </label>
           </div>
-          <div class="storyVideoDefaults">
-            <strong>视频生成参数</strong>
-            <label class="inline">
-              <span>兜底时长</span>
-              <input id="seedanceDuration" type="number" min="4" max="15" value="5">
-              <span>秒</span>
-            </label>
-            <label class="inline">
-              <span>默认清晰度</span>
-              <select id="seedanceResolution">
-                <option value="480p">480p</option>
-                <option value="720p">720p</option>
-                <option value="1080p">1080p</option>
-              </select>
-            </label>
-            <label class="inline">
-              <span>默认比例</span>
-              <select id="seedanceSize">
-                <option value="adaptive">自适应</option>
-                <option value="9:16">9:16</option>
-                <option value="16:9">16:9</option>
-                <option value="1:1">1:1</option>
-                <option value="3:4">3:4</option>
-                <option value="4:3">4:3</option>
-                <option value="21:9">21:9</option>
-              </select>
-            </label>
-            <label class="inline storyAudioToggle">
-              <input id="seedanceAudio" type="checkbox" checked>
-              <span>生成声音</span>
-            </label>
-            <button id="applyStoryVideoDefaultsBtn" type="button">应用到所有镜头</button>
-          </div>
-          <div class="storyVideoReferencePanel">
+          <div class="storyVideoPanel">
+            <div class="storyVideoPanelHead">
+              <strong>分镜视频生成</strong>
+              <div class="referenceActions storyVideoControls">
+                <label class="inline">
+                  <span>兜底时长</span>
+                  <input id="seedanceDuration" type="number" min="4" max="15" value="5">
+                  <span>秒</span>
+                </label>
+                <label class="inline">
+                  <span>清晰度</span>
+                  <select id="seedanceResolution">
+                    <option value="480p">480p</option>
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                  </select>
+                </label>
+                <label class="inline">
+                  <span>比例</span>
+                  <select id="seedanceSize">
+                    <option value="adaptive">自适应</option>
+                    <option value="9:16">9:16</option>
+                    <option value="16:9">16:9</option>
+                    <option value="1:1">1:1</option>
+                    <option value="3:4">3:4</option>
+                    <option value="4:3">4:3</option>
+                    <option value="21:9">21:9</option>
+                  </select>
+                </label>
+                <label class="inline storyAudioToggle">
+                  <input id="seedanceAudio" type="checkbox" checked>
+                  <span>声音</span>
+                </label>
+                <button id="applyStoryVideoDefaultsBtn" type="button">应用到所有镜头</button>
+                <button id="useGeneratedVideosBtn" type="button">使用已生成视频</button>
+                <button id="addStoryVideoRefImageBtn" type="button">上传参考图</button>
+                <button id="addStoryVideoRefVideoBtn" type="button">上传参考视频</button>
+                <button id="addStoryVideoRefAudioBtn" type="button">上传参考声音</button>
+              </div>
+            </div>
             <div class="referenceListHead">
               <span>视频参考素材</span>
               <button id="clearStoryVideoRefsBtn" type="button">清空参考素材</button>
             </div>
-            <div class="referenceActions videoReferenceActions">
-              <button id="useGeneratedVideosBtn" type="button">使用已生成视频</button>
-              <button id="addStoryVideoRefImageBtn" type="button">上传参考图</button>
-              <button id="addStoryVideoRefVideoBtn" type="button">上传参考视频</button>
-              <button id="addStoryVideoRefAudioBtn" type="button">上传参考声音</button>
-            </div>
             <div id="storyVideoRefsList" class="videoReferenceList empty">可添加参考图、参考视频或参考声音，用于 Seedance2.0 生成分镜视频。</div>
           </div>
+          <div id="storyboardList" class="storyboardList empty">生成后会在这里展示镜号、时间、画面、景别、运镜、字幕和剪辑建议。</div>
           <div class="storyExportTools">
             <label class="field exportDir">
               <span>导出目录</span>
@@ -211,7 +226,6 @@
               <button id="exportStoryboardVideosBtn" type="button">导出分镜视频</button>
             </div>
           </div>
-          <div id="storyboardList" class="storyboardList empty">生成后会在这里展示镜号、时间、画面、景别、运镜、字幕和剪辑建议。</div>
         </section>
         <section id="thumbPanel" class="tabPanel" role="tabpanel" hidden>
           <div class="sectionHead thumbHead">
