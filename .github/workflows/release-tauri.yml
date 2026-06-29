@@ -78,6 +78,31 @@ jobs:
           updaterJsonPreferNsis: true
           args: --target aarch64-apple-darwin --bundles dmg
 
+      - name: Normalize Mac DMG asset name
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace("refs/tags/", "");
+            const version = tag.replace(/^v/, "");
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            const desiredName = `AI短视频创作工具_${version}_aarch64.dmg`;
+            const asset = release.data.assets.find((item) =>
+              item.name.endsWith(`_${version}_aarch64.dmg`) && item.name !== desiredName
+            );
+            if (!asset) {
+              core.info("No Mac DMG asset needs renaming.");
+              return;
+            }
+            await github.rest.repos.updateReleaseAsset({
+              owner,
+              repo,
+              asset_id: asset.id,
+              name: desiredName,
+            });
+            core.info(`Renamed ${asset.name} to ${desiredName}`);
+
   release-windows:
     runs-on: windows-latest
     defaults:
