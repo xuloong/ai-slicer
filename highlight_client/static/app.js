@@ -16,6 +16,7 @@ const settingsVersion = $("settingsVersion");
 const checkUpdateBtn = $("checkUpdateBtn");
 const updateState = $("updateState");
 const exportDiagnosticsBtn = $("exportDiagnosticsBtn");
+const stopLocalServerBtn = $("stopLocalServerBtn");
 const whisperModelState = $("whisperModelState");
 const downloadWhisperModelBtn = $("downloadWhisperModelBtn");
 const clearWhisperModelBtn = $("clearWhisperModelBtn");
@@ -1413,6 +1414,25 @@ exportDiagnosticsBtn?.addEventListener("click", async () => {
     configState.textContent = `诊断信息已导出：${data.path}`;
   } catch (error) {
     configState.textContent = error.message;
+  }
+});
+
+stopLocalServerBtn?.addEventListener("click", async () => {
+  const invoke = tauriInvoke();
+  if (!invoke) {
+    configState.textContent = "关闭本地服务仅在安装后的客户端中可用。";
+    return;
+  }
+  const confirmed = window.confirm("关闭本地服务后，当前客户端页面会停止响应。确定要关闭吗？");
+  if (!confirmed) return;
+  stopLocalServerBtn.disabled = true;
+  configState.textContent = "正在关闭本地服务...";
+  try {
+    const message = await invoke("stop_local_server");
+    configState.textContent = message || "本地服务已关闭";
+  } catch (error) {
+    configState.textContent = `关闭本地服务失败：${error?.message || error}`;
+    stopLocalServerBtn.disabled = false;
   }
 });
 

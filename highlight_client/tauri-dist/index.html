@@ -26,6 +26,31 @@
       color: #6e7b74;
       font-size: 14px;
     }
+    .recovery {
+      display: none;
+      margin-top: 18px;
+      color: #6e7b74;
+      font-size: 13px;
+    }
+    .recovery.visible {
+      display: block;
+    }
+    button {
+      height: 38px;
+      margin-top: 10px;
+      padding: 0 16px;
+      border: 1px solid #c9d2cb;
+      border-radius: 8px;
+      background: #fff;
+      color: #207a5a;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: default;
+      opacity: 0.6;
+    }
     .spinner {
       width: 34px;
       height: 34px;
@@ -45,6 +70,43 @@
     <div class="spinner"></div>
     <div class="title">正在启动 AI短视频创作工具</div>
     <div class="hint">本地服务准备完成后会自动进入主界面。</div>
+    <div id="recovery" class="recovery">
+      <div id="recoveryText">如果长时间停留在这里，可关闭残留本地服务后重新打开客户端。</div>
+      <button id="stopServerBtn" type="button">关闭本地服务</button>
+    </div>
   </div>
+  <script>
+    const recovery = document.getElementById("recovery");
+    const recoveryText = document.getElementById("recoveryText");
+    const stopServerBtn = document.getElementById("stopServerBtn");
+
+    setTimeout(() => {
+      recovery.classList.add("visible");
+    }, 10000);
+
+    function tauriInvoke() {
+      return window.__TAURI__?.core?.invoke
+        || window.__TAURI__?.tauri?.invoke
+        || window.__TAURI_INTERNALS__?.invoke
+        || null;
+    }
+
+    stopServerBtn.addEventListener("click", async () => {
+      const invoke = tauriInvoke();
+      if (!invoke) {
+        recoveryText.textContent = "当前环境无法直接关闭服务，请退出客户端后重新打开。";
+        return;
+      }
+      stopServerBtn.disabled = true;
+      recoveryText.textContent = "正在关闭本地服务...";
+      try {
+        await invoke("stop_local_server");
+        recoveryText.textContent = "本地服务已关闭，请重新打开客户端。";
+      } catch (error) {
+        recoveryText.textContent = `关闭失败：${error?.message || error}`;
+        stopServerBtn.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>

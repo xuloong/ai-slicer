@@ -186,6 +186,15 @@ async fn install_update_if_available(app: tauri::AppHandle) -> Result<String, St
     app.restart()
 }
 
+#[tauri::command]
+async fn stop_local_server(app: tauri::AppHandle) -> Result<String, String> {
+    let pid = app
+        .try_state::<ServerState>()
+        .and_then(|state| state.sidecar_pid.lock().ok().and_then(|pid| *pid));
+    stop_server_on_exit(pid, SERVER_PORT);
+    Ok("本地服务已关闭。如需继续使用，请重新打开客户端。".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -216,7 +225,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             check_for_update,
-            install_update_if_available
+            install_update_if_available,
+            stop_local_server
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
