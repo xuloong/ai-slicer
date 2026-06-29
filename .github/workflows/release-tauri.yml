@@ -85,7 +85,7 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
-          args: --target aarch64-apple-darwin --bundles dmg
+          args: --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Normalize Mac DMG asset name
         uses: actions/github-script@v7
