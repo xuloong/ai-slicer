@@ -1645,6 +1645,24 @@ def terminate_process(process: subprocess.Popen) -> None:
             pass
 
 
+def subprocess_startup_options() -> dict:
+    if not is_windows():
+        return {}
+    options: dict[str, object] = {}
+    try:
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW
+    except AttributeError:
+        pass
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        options["startupinfo"] = startupinfo
+    except AttributeError:
+        pass
+    return options
+
+
 def task_cancel(task_id: str) -> bool:
     with TASK_LOCK:
         task = TASKS.get(task_id)
@@ -1672,6 +1690,7 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        **subprocess_startup_options(),
     )
     register_process(task_id, process)
     try:
@@ -1781,17 +1800,22 @@ def parse_media_info(stderr: object) -> dict:
         text = line.strip()
         if "Duration:" in text and "bitrate:" in text:
             info["bitrate"] = text.split("bitrate:", 1)[1].strip()
-        if " Video: " in text or text.startswith("Stream") and "Video:" in text:
+        if " Video: " in text or (text.startswith("Stream") and "Video:" in text):
             after = text.split("Video:", 1)[1].strip()
             info["video"] = after.split(",", 1)[0].strip()
             for part in [item.strip() for item in after.split(",")]:
-                if "x" in part and part.split(" ")[0].replace("x", "").isdigit():
-                    info["resolution"] = part.split(" ")[0]
+                size_match = re.search(r"\b(\d{2,5})x(\d{2,5})\b", part)
+                if size_match:
+                    info["resolution"] = f"{size_match.group(1)}x{size_match.group(2)}"
                 if "DAR" in part:
                     info["ratio"] = part.split("DAR", 1)[1].split("]", 1)[0].strip()
                 if "fps" in part:
                     info["fps"] = part.strip()
-        if " Audio: " in text or text.startswith("Stream") and "Audio:" in text:
+                elif "tbr" in part and info["fps"] == "未知":
+                    rate_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*tbr", part)
+                    if rate_match:
+                        info["fps"] = fps_label(rate_match.group(1))
+        if " Audio: " in text or (text.startswith("Stream") and "Audio:" in text):
             after = text.split("Audio:", 1)[1].strip()
             pieces = [item.strip() for item in after.split(",")]
             info["audio"] = ", ".join(pieces[:3])
@@ -1862,7 +1886,7 @@ def ffprobe_media_info(video: Path) -> dict | None:
             probe,
             "-v", "error",
             "-show_entries",
-            "format=duration,bit_rate:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,display_aspect_ratio,bit_rate",
+            "format=duration,bit_rate:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,display_aspect_ratio,bit_rate,sample_rate,channels",
             "-of", "json",
             str(video),
         ], timeout=60)
@@ -1892,11 +1916,22 @@ def ffprobe_media_info(video: Path) -> dict | None:
     resolution = f"{display_width}x{display_height}" if display_width and display_height else "未知"
     frame_rate = (video_stream or {}).get("avg_frame_rate") or (video_stream or {}).get("r_frame_rate")
 
+    audio_label = "未检测到"
+    if audio_stream:
+        audio_parts = [str(audio_stream.get("codec_name") or "").strip()]
+        sample_rate = str(audio_stream.get("sample_rate") or "").strip()
+        channels = str(audio_stream.get("channels") or "").strip()
+        if sample_rate:
+            audio_parts.append(f"{sample_rate} Hz")
+        if channels:
+            audio_parts.append(f"{channels} 声道")
+        audio_label = ", ".join(part for part in audio_parts if part) or "已检测到"
+
     return {
         "duration": seconds_to_clock(duration_seconds) if duration_seconds > 0 else "未知",
         "durationSeconds": duration_seconds,
         "video": str(video_stream.get("codec_name") or "未检测到") if video_stream else "未检测到",
-        "audio": str(audio_stream.get("codec_name") or "未检测到") if audio_stream else "未检测到",
+        "audio": audio_label,
         "resolution": resolution,
         "ratio": ratio_label(display_width, display_height, video_stream or {}),
         "fps": fps_label(frame_rate),
@@ -2009,7 +2044,8 @@ def mp4_atom_media_info(video: Path) -> dict | None:
 
 def probe_media_info(video: Path) -> dict:
     info = ffprobe_media_info(video)
-    if info:
+    needs_fallback = not info or any(info.get(key) in {"", None, "未知", "未检测到"} for key in ("fps", "audio"))
+    if info and not needs_fallback:
         return info
     atom_info = mp4_atom_media_info(video)
     try:
@@ -2018,7 +2054,7 @@ def probe_media_info(video: Path) -> dict:
         ffmpeg_info["durationSeconds"] = parse_duration_seconds(result.stderr)
     except Exception:
         ffmpeg_info = {}
-    merged = merge_media_info(ffmpeg_info, atom_info)
+    merged = merge_media_info(info, merge_media_info(ffmpeg_info, atom_info))
     if atom_info and atom_info.get("durationSeconds") and not merged.get("durationSeconds"):
         merged["durationSeconds"] = atom_info.get("durationSeconds")
     return merged
@@ -4103,25 +4139,25 @@ def choose_with_tkinter(kind: str, default_name: str = "") -> str:
 
 def reveal_in_finder(path: Path) -> None:
     if is_macos():
-        subprocess.Popen(["open", "-R", str(path)])
+        subprocess.Popen(["open", "-R", str(path)], **subprocess_startup_options())
     elif is_windows():
-        subprocess.Popen(["explorer", f"/select,{path}"])
+        subprocess.Popen(["explorer", f"/select,{path}"], **subprocess_startup_options())
     else:
         opener = shutil.which("xdg-open")
         if opener:
-            subprocess.Popen([opener, str(path.parent)])
+            subprocess.Popen([opener, str(path.parent)], **subprocess_startup_options())
 
 
 def open_folder(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     if is_macos():
-        subprocess.Popen(["open", str(path)])
+        subprocess.Popen(["open", str(path)], **subprocess_startup_options())
     elif is_windows():
-        subprocess.Popen(["explorer", str(path)])
+        subprocess.Popen(["explorer", str(path)], **subprocess_startup_options())
     else:
         opener = shutil.which("xdg-open")
         if opener:
-            subprocess.Popen([opener, str(path)])
+            subprocess.Popen([opener, str(path)], **subprocess_startup_options())
 
 
 def response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
