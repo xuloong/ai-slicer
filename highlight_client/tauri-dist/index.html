@@ -2,7 +2,6 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="0; url=http://127.0.0.1:8765/">
   <title>AI短视频创作工具</title>
   <style>
     body {
@@ -14,14 +13,38 @@
       background: #f6f7f3;
       color: #1d2522;
     }
+    .boot {
+      text-align: center;
+      line-height: 1.7;
+    }
+    .title {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .hint {
+      color: #6e7b74;
+      font-size: 14px;
+    }
+    .spinner {
+      width: 34px;
+      height: 34px;
+      margin: 0 auto 18px;
+      border: 4px solid #dbe3dc;
+      border-top-color: #207a5a;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
-  <p>正在启动本地剪辑服务...</p>
-  <script>
-    setTimeout(() => {
-      location.href = "http://127.0.0.1:8765/";
-    }, 500);
-  </script>
+  <div class="boot">
+    <div class="spinner"></div>
+    <div class="title">正在启动 AI短视频创作工具</div>
+    <div class="hint">本地服务准备完成后会自动进入主界面。</div>
+  </div>
 </body>
 </html>

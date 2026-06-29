@@ -36,6 +36,27 @@ fn server_matches_current_version(port: u16) -> bool {
     response.contains(&version_marker) || response.contains(&spaced_version_marker)
 }
 
+fn server_is_ready(port: u16) -> bool {
+    let Ok(mut addrs) = ("127.0.0.1", port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let request =
+        format!("GET /api/config HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok()
+        && (response.starts_with("HTTP/1.0 200") || response.starts_with("HTTP/1.1 200"))
+}
+
 #[cfg(target_os = "windows")]
 fn pids_listening_on_port(port: u16) -> Vec<u32> {
     let Ok(output) = Command::new("cmd")
@@ -111,6 +132,26 @@ fn stop_server_on_exit(pid: Option<u32>, port: u16) {
     }
 }
 
+fn navigate_when_server_ready(app: tauri::AppHandle, port: u16) {
+    std::thread::spawn(move || {
+        for _ in 0..120 {
+            if server_is_ready(port) {
+                let url = format!("http://127.0.0.1:{port}/");
+                let app_for_window = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(window) = app_for_window.get_webview_window("main") {
+                        if let Ok(url) = tauri::Url::parse(&url) {
+                            let _ = window.navigate(url);
+                        }
+                    }
+                });
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+}
+
 #[tauri::command]
 async fn check_for_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_updater::UpdaterExt;
@@ -170,6 +211,7 @@ pub fn run() {
                     }
                 }
             }
+            navigate_when_server_ready(app.handle().clone(), SERVER_PORT);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
