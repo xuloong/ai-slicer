@@ -39,18 +39,6 @@ jobs:
       - name: Install ffmpeg tools
         run: brew install ffmpeg
 
-      - name: Verify private config secrets
-        run: |
-          test -n "$ARK_API_KEY"
-          test -n "$APIMART_API_KEY"
-          test -n "$TOS_ACCESS_KEY_ID"
-          test -n "$TOS_SECRET_ACCESS_KEY"
-        env:
-          ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
-          APIMART_API_KEY: ${{ secrets.APIMART_API_KEY }}
-          TOS_ACCESS_KEY_ID: ${{ secrets.TOS_ACCESS_KEY_ID }}
-          TOS_SECRET_ACCESS_KEY: ${{ secrets.TOS_SECRET_ACCESS_KEY }}
-
       - name: Build sidecar
         run: python scripts/build_sidecar.py
         env:
@@ -142,19 +130,6 @@ jobs:
       - name: Install ffmpeg tools
         shell: pwsh
         run: choco install ffmpeg -y --no-progress
-
-      - name: Verify private config secrets
-        shell: pwsh
-        run: |
-          if (-not $env:ARK_API_KEY) { throw "Missing ARK_API_KEY secret" }
-          if (-not $env:APIMART_API_KEY) { throw "Missing APIMART_API_KEY secret" }
-          if (-not $env:TOS_ACCESS_KEY_ID) { throw "Missing TOS_ACCESS_KEY_ID secret" }
-          if (-not $env:TOS_SECRET_ACCESS_KEY) { throw "Missing TOS_SECRET_ACCESS_KEY secret" }
-        env:
-          ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
-          APIMART_API_KEY: ${{ secrets.APIMART_API_KEY }}
-          TOS_ACCESS_KEY_ID: ${{ secrets.TOS_ACCESS_KEY_ID }}
-          TOS_SECRET_ACCESS_KEY: ${{ secrets.TOS_SECRET_ACCESS_KEY }}
 
       - name: Build sidecar
         run: python scripts/build_sidecar.py
