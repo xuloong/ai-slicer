@@ -223,42 +223,82 @@ jobs:
             });
             core.info(`Renamed ${asset.name} to ${desiredName}`);
 
-  verify-updater-json:
+  publish-updater-json:
     runs-on: ubuntu-latest
     needs:
       - release-macos
       - release-windows
     steps:
-      - name: Verify latest.json exists and contains desktop platforms
+      - name: Publish and verify latest.json
         uses: actions/github-script@v7
         with:
           script: |
             const tag = context.ref.replace("refs/tags/", "");
+            const version = tag.replace(/^v/, "");
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            let latestAsset = null;
+            let release = null;
+            let assets = [];
+            let macArchive = null;
+            let macSig = null;
+            let winInstaller = null;
+            let winSig = null;
             for (let i = 0; i < 12; i++) {
-              const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-              latestAsset = release.data.assets.find((item) => item.name === "latest.json");
-              if (latestAsset) break;
+              release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              assets = release.data.assets;
+              macArchive = assets.find((item) => item.name.endsWith("aarch64.app.tar.gz"));
+              macSig = assets.find((item) => item.name.endsWith("aarch64.app.tar.gz.sig"));
+              winInstaller = assets.find((item) => item.name.endsWith("_x64-setup.exe"));
+              winSig = assets.find((item) => item.name.endsWith("_x64-setup.exe.sig"));
+              if (macArchive && macSig && winInstaller && winSig) break;
               await new Promise((resolve) => setTimeout(resolve, 5000));
             }
+            if (!macArchive || !macSig || !winInstaller || !winSig) {
+              core.setFailed(`Missing updater assets. assets=${assets.map((item) => item.name).join(",")}`);
+              return;
+            }
+            async function fetchText(asset) {
+              const response = await fetch(asset.browser_download_url);
+              if (!response.ok) {
+                throw new Error(`Could not fetch ${asset.name}: HTTP ${response.status}`);
+              }
+              return (await response.text()).trim();
+            }
+            const latest = {
+              version,
+              notes: release.data.body || "",
+              pub_date: release.data.published_at || new Date().toISOString(),
+              platforms: {
+                "darwin-aarch64": {
+                  signature: await fetchText(macSig),
+                  url: macArchive.browser_download_url,
+                },
+                "windows-x86_64": {
+                  signature: await fetchText(winSig),
+                  url: winInstaller.browser_download_url,
+                },
+              },
+            };
+            const existing = assets.find((item) => item.name === "latest.json");
+            if (existing) {
+              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: existing.id });
+            }
+            const body = Buffer.from(JSON.stringify(latest, null, 2));
+            await github.rest.repos.uploadReleaseAsset({
+              owner,
+              repo,
+              release_id: release.data.id,
+              name: "latest.json",
+              data: body,
+              headers: {
+                "content-type": "application/json",
+                "content-length": body.length,
+              },
+            });
+            const refreshed = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            const latestAsset = refreshed.data.assets.find((item) => item.name === "latest.json");
             if (!latestAsset) {
-              core.setFailed("latest.json was not uploaded to the release.");
+              core.setFailed("latest.json upload did not appear in release assets.");
               return;
             }
-            const response = await fetch(latestAsset.browser_download_url);
-            if (!response.ok) {
-              core.setFailed(`Could not fetch latest.json: HTTP ${response.status}`);
-              return;
-            }
-            const latest = await response.json();
-            const platforms = latest.platforms || {};
-            const platformKeys = Object.keys(platforms);
-            const hasMac = platformKeys.some((key) => key.includes("darwin"));
-            const hasWindows = platformKeys.some((key) => key.includes("windows"));
-            if (!latest.version || !hasMac || !hasWindows) {
-              core.setFailed(`latest.json is incomplete. version=${latest.version || ""}, platforms=${platformKeys.join(",")}`);
-              return;
-            }
-            core.info(`latest.json verified for ${latest.version}: ${platformKeys.join(", ")}`);
+            core.info(`latest.json published for ${version}: ${Object.keys(latest.platforms).join(", ")}`);

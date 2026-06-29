@@ -1,6 +1,6 @@
 [package]
 name = "highlight-client"
-version = "0.1.12"
+version = "0.1.13"
 description = "Local highlight video editor"
 authors = ["Highlight Client"]
 edition = "2021"
