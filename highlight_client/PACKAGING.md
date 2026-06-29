@@ -47,7 +47,7 @@ https://github.com/xuloong/ai-slicer/releases/latest/download/latest.json
 
 发布流程：
 
-1. 保存 updater 私钥。当前生成的私钥临时放在 `/private/tmp/ai-short-video-updater.key`，请把文件内容保存到 GitHub Secrets:
+1. 保存 updater 私钥。当前生成的私钥临时放在 `/private/tmp/ai-short-video-updater-v2.key`，请把文件内容保存到 GitHub Secrets:
    - `TAURI_SIGNING_PRIVATE_KEY`
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 留空即可，除非后续重新生成带密码的私钥。
 2. 修改版本号，保持以下三个位置一致：
@@ -61,10 +61,10 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-4. GitHub Actions 会运行 `.github/workflows/release-tauri.yml`，生成 macOS / Windows 安装包、更新包签名和 `latest.json`。
+4. GitHub Actions 会运行 `.github/workflows/release-tauri.yml`，生成 macOS / Windows 安装包、更新包签名和 `latest.json`。Release 工作流会校验 `latest.json` 是否存在且同时包含 macOS / Windows 平台信息。
 5. 已安装客户端启动后会自动检查一次更新；用户也可以在“设置”里点击“检查更新”。
 
-注意：Tauri 更新包必须签名校验。私钥丢失后，已经安装的旧客户端将无法升级到后续版本，需要重新分发完整安装包。
+注意：Tauri 更新包必须签名校验。私钥丢失后，已经安装的旧客户端将无法升级到后续版本，需要重新分发完整安装包。`v0.1.10` 发布时没有生成有效 `latest.json`，因此需要用户手动安装 `v0.1.11` 或更新版本；从配置了新私钥的版本开始，后续版本才能通过“检查更新”自动升级。
 
 ## AI 生成素材日志和对象存储
 

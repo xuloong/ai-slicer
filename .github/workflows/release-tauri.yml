@@ -39,6 +39,15 @@ jobs:
       - name: Install ffmpeg tools
         run: brew install ffmpeg
 
+      - name: Verify updater signing secret
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "Missing TAURI_SIGNING_PRIVATE_KEY secret. Updater latest.json cannot be generated without it."
+            exit 1
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
       - name: Build sidecar
         run: python scripts/build_sidecar.py
         env:
@@ -86,11 +95,16 @@ jobs:
             const version = tag.replace(/^v/, "");
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
             const desiredName = `AI短视频创作工具_${version}_aarch64.dmg`;
-            const asset = release.data.assets.find((item) =>
-              item.name.endsWith(`_${version}_aarch64.dmg`) && item.name !== desiredName
-            );
+            let asset = null;
+            for (let i = 0; i < 12; i++) {
+              const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              asset = release.data.assets.find((item) =>
+                item.name.endsWith(`_${version}_aarch64.dmg`) && item.name !== desiredName
+              );
+              if (asset) break;
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
             if (!asset) {
               core.info("No Mac DMG asset needs renaming.");
               return;
@@ -131,6 +145,15 @@ jobs:
         shell: pwsh
         run: choco install ffmpeg -y --no-progress
 
+      - name: Verify updater signing secret
+        shell: pwsh
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "Missing TAURI_SIGNING_PRIVATE_KEY secret. Updater latest.json cannot be generated without it."
+          }
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
       - name: Build sidecar
         run: python scripts/build_sidecar.py
         env:
@@ -153,25 +176,89 @@ jobs:
           WHISPER_REPO_ID: ${{ secrets.WHISPER_REPO_ID }}
           BUNDLE_WHISPER_MODEL: ${{ secrets.BUNDLE_WHISPER_MODEL }}
 
-      - name: Disable updater artifact signing for Windows installer
-        shell: pwsh
-        run: |
-          $config = Get-Content src-tauri/tauri.conf.json -Raw
-          $config = $config -replace '"createUpdaterArtifacts": true', '"createUpdaterArtifacts": false'
-          Set-Content src-tauri/tauri.conf.json $config
-
-      - name: Build Tauri Windows installer
-        run: npm run build -- --bundles nsis
+      - name: Build and publish Tauri Windows release
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
-      - name: Upload Windows installer to release
-        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "AI短视频创作工具 ${{ github.ref_name }}"
-          body: "自动发布安装包和更新包。"
-          draft: false
+          projectPath: highlight_client
+          tagName: ${{ github.ref_name }}
+          releaseName: "AI短视频创作工具 ${{ github.ref_name }}"
+          releaseBody: "自动发布安装包和更新包。"
+          releaseDraft: false
           prerelease: false
-          files: highlight_client/src-tauri/target/release/bundle/nsis/*.exe
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --bundles nsis
+
+      - name: Normalize Windows installer asset name
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace("refs/tags/", "");
+            const version = tag.replace(/^v/, "");
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const desiredName = `AI短视频创作工具_${version}_x64-setup.exe`;
+            let asset = null;
+            for (let i = 0; i < 12; i++) {
+              const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              asset = release.data.assets.find((item) =>
+                item.name.endsWith(`_${version}_x64-setup.exe`) && item.name !== desiredName
+              );
+              if (asset) break;
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
+            if (!asset) {
+              core.info("No Windows installer asset needs renaming.");
+              return;
+            }
+            await github.rest.repos.updateReleaseAsset({
+              owner,
+              repo,
+              asset_id: asset.id,
+              name: desiredName,
+            });
+            core.info(`Renamed ${asset.name} to ${desiredName}`);
+
+  verify-updater-json:
+    runs-on: ubuntu-latest
+    needs:
+      - release-macos
+      - release-windows
+    steps:
+      - name: Verify latest.json exists and contains desktop platforms
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace("refs/tags/", "");
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            let latestAsset = null;
+            for (let i = 0; i < 12; i++) {
+              const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              latestAsset = release.data.assets.find((item) => item.name === "latest.json");
+              if (latestAsset) break;
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
+            if (!latestAsset) {
+              core.setFailed("latest.json was not uploaded to the release.");
+              return;
+            }
+            const response = await fetch(latestAsset.browser_download_url);
+            if (!response.ok) {
+              core.setFailed(`Could not fetch latest.json: HTTP ${response.status}`);
+              return;
+            }
+            const latest = await response.json();
+            const platforms = latest.platforms || {};
+            const platformKeys = Object.keys(platforms);
+            const hasMac = platformKeys.some((key) => key.includes("darwin"));
+            const hasWindows = platformKeys.some((key) => key.includes("windows"));
+            if (!latest.version || !hasMac || !hasWindows) {
+              core.setFailed(`latest.json is incomplete. version=${latest.version || ""}, platforms=${platformKeys.join(",")}`);
+              return;
+            }
+            core.info(`latest.json verified for ${latest.version}: ${platformKeys.join(", ")}`);

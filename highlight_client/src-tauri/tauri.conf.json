@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI短视频创作工具",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "identifier": "com.local.highlight-client",
   "build": {
     "beforeDevCommand": "python3 server.py",
@@ -48,7 +48,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdFOThCMDMwNTRGMEIzRTcKUldUbnMvQlVNTENZZnJqVzc3aFhxM05kZDIxenZSZ2pnSFg0TWprRWc0WnhMTloxWWY1YzZ1WTYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE2M0UwRjdCRkY3OUE5QkUKUldTK3FYbi9ldzgrRnRvbW5MQ25ZdVY2MDlkL0xMVFhRZ2pEMmwrRTZQMXlqTzhDdHA5ZnFZY24K",
       "endpoints": [
         "https://github.com/xuloong/ai-slicer/releases/latest/download/latest.json"
       ],
