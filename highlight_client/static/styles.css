@@ -119,10 +119,10 @@ h1 {
 }
 
 .brandTitle img {
-  width: 44px;
-  height: 44px;
-  flex: 0 0 44px;
-  border-radius: 10px;
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+  border-radius: 14px;
   object-fit: cover;
   box-shadow: 0 4px 12px rgba(29, 37, 34, 0.12);
 }
