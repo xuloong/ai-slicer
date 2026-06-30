@@ -109,14 +109,18 @@ def truthy(value: str) -> bool:
     return str(value or "").strip().lower() not in {"0", "false", "no", "off", "否"}
 
 
-def detect_ffprobe() -> Path | None:
-    env_value = os.environ.get("FFPROBE_PATH", "").strip()
+def detect_tool(env_name: str, executable: str) -> Path | None:
+    env_value = os.environ.get(env_name, "").strip()
     if env_value and Path(env_value).exists():
         return Path(env_value)
-    found = shutil.which("ffprobe.exe" if os.name == "nt" else "ffprobe") or shutil.which("ffprobe")
+    found = shutil.which(executable)
     if found:
         return Path(found)
     return None
+
+
+def detect_ffmpeg() -> Path | None:
+    return detect_tool("FFMPEG_PATH", "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
 
 
 def ensure_whisper_model() -> Path | None:
@@ -180,14 +184,11 @@ def main() -> None:
     ]
     if os.name == "nt":
         command.append("--noconsole")
-    ffprobe = detect_ffprobe()
-    if ffprobe:
-        command.extend([
-            "--add-binary",
-            f"{ffprobe}{sep}ffmpeg-tools",
-        ])
+    ffmpeg = detect_ffmpeg()
+    if ffmpeg:
+        command.extend(["--add-binary", f"{ffmpeg}{sep}ffmpeg-tools"])
     else:
-        print("warning: ffprobe not found; packaged app will fall back to ffmpeg/mp4 parser.")
+        print("warning: ffmpeg not found; thumbnail/export features will require a user configured ffmpeg path.")
     if whisper_model:
         command.extend([
             "--add-data",

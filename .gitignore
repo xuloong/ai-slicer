@@ -14,6 +14,7 @@ highlight_parts/
 *.png
 *.swift
 
+!highlight_client/static/app-logo.png
 !highlight_client/src-tauri/icons/*.png
 !highlight_client/src-tauri/icons/**/*.png
 

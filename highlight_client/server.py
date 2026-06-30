@@ -88,12 +88,12 @@ HISTORY_FILE = DATA_DIR / "history.json"
 ARK_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 ARK_PRIMARY_MODEL = "doubao-seed-2-1-turbo-260628"
 ARK_FALLBACK_MODEL = "doubao-seed-2-0-pro-260215"
-APIMART_IMAGE_URL = "https://api.apimart.ai/v1/images/generations"
-APIMART_VIDEO_URL = "https://api.apimart.ai/v1/videos/generations"
-APIMART_TASK_URL = "https://api.apimart.ai/v1/tasks"
-APIMART_UPLOAD_IMAGE_URL = "https://api.apimart.ai/v1/uploads/images"
-APIMART_UPLOAD_VIDEO_URL = "https://api.apimart.ai/v1/uploads/videos"
-APIMART_UPLOAD_AUDIO_URL = "https://api.apimart.ai/v1/uploads/audios"
+APIMART_IMAGE_URL = "https://api.apib.ai/v1/images/generations"
+APIMART_VIDEO_URL = "https://api.apib.ai/v1/videos/generations"
+APIMART_TASK_URL = "https://api.apib.ai/v1/tasks"
+APIMART_UPLOAD_IMAGE_URL = "https://api.apib.ai/v1/uploads/images"
+APIMART_UPLOAD_VIDEO_URL = "https://api.apib.ai/v1/uploads/videos"
+APIMART_UPLOAD_AUDIO_URL = "https://api.apib.ai/v1/uploads/audios"
 WECOM_APPID = "ww3356a195475005ac"
 WECOM_AGENTID = "1000024"
 WECOM_REDIRECT_URI = "https://sso.topsky.com/api/"
@@ -835,6 +835,18 @@ def notify_generation_asset(feature: str, prompt: str, params: dict, storage: di
 
 
 def detect_ffmpeg_path() -> str | None:
+    ffmpeg_name = "ffmpeg.exe" if is_windows() else "ffmpeg"
+    candidates = [
+        RESOURCE_ROOT / "ffmpeg-tools" / ffmpeg_name,
+        DEV_ROOT / "ffmpeg-tools" / ffmpeg_name,
+    ]
+    try:
+        candidates.append(Path(getattr(sys, "executable", "")).resolve().parent / "ffmpeg-tools" / ffmpeg_name)
+    except Exception:
+        pass
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
     if imageio_ffmpeg is not None:
         try:
             bundled = imageio_ffmpeg.get_ffmpeg_exe()
@@ -1370,6 +1382,38 @@ def ark_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+_APIMART_OPENER = None
+
+
+def apimart_opener():
+    global _APIMART_OPENER
+    if _APIMART_OPENER is None:
+        _APIMART_OPENER = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=ark_ssl_context()),
+        )
+    return _APIMART_OPENER
+
+
+def ai_url_error_message(exc: urllib.error.URLError) -> str:
+    reason = getattr(exc, "reason", exc)
+    text = str(reason or exc)
+    if isinstance(reason, ConnectionRefusedError) or "WinError 10061" in text or "Connection refused" in text:
+        return (
+            "无法连接 AI 生成接口：连接被拒绝。"
+            "请检查这台电脑的代理/VPN/安全软件设置，尤其是系统代理是否指向了未启动的本机代理端口；"
+            "也可以让用户在浏览器中打开 https://api.apib.ai 测试网络是否可达。"
+            f" 原始错误：{exc}"
+        )
+    if isinstance(reason, TimeoutError) or "timed out" in text.lower():
+        return f"无法连接 AI 生成接口：连接超时，请检查网络或稍后重试。原始错误：{exc}"
+    return f"无法连接 AI 生成接口：{exc}"
+
+
+def apimart_urlopen(request: urllib.request.Request, timeout: int):
+    return apimart_opener().open(request, timeout=timeout)
+
+
 def json_request(method: str, url: str, payload: dict | None = None, token: str | None = None, timeout: int = 120) -> dict:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"content-type": "application/json"}
@@ -1377,13 +1421,18 @@ def json_request(method: str, url: str, payload: dict | None = None, token: str 
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=ark_ssl_context()) as resp:
+        opener = apimart_urlopen if url.startswith("https://api.apib.ai/") else None
+        if opener:
+            resp_context = opener(request, timeout)
+        else:
+            resp_context = urllib.request.urlopen(request, timeout=timeout, context=ark_ssl_context())
+        with resp_context as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"AI 生成接口请求失败：HTTP {exc.code} {body[:800]}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法连接 AI 生成接口：{exc}") from exc
+        raise RuntimeError(ai_url_error_message(exc)) from exc
 
 
 def image_mime_type(path: Path) -> str:
@@ -1443,13 +1492,13 @@ def apimart_upload_image(path: Path, task_id: str | None = None) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=180, context=ark_ssl_context()) as resp:
+        with apimart_urlopen(request, timeout=180) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"参考图上传失败：HTTP {exc.code} {body_text[:800]}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法上传参考图到 AI 生成接口：{exc}") from exc
+        raise RuntimeError(ai_url_error_message(exc).replace("无法连接 AI 生成接口", "无法上传参考图到 AI 生成接口")) from exc
     url = result.get("url") if isinstance(result, dict) else ""
     if not url:
         raise RuntimeError(f"上传参考图未返回 URL：{json.dumps(result, ensure_ascii=False)[:800]}")
@@ -1487,13 +1536,13 @@ def apimart_upload_media(path: Path, kind: str, task_id: str | None = None) -> s
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=300, context=ark_ssl_context()) as resp:
+        with apimart_urlopen(request, timeout=300) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"{label}上传失败：HTTP {exc.code} {body_text[:800]}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法上传{label}到 AI 生成接口：{exc}") from exc
+        raise RuntimeError(ai_url_error_message(exc).replace("无法连接 AI 生成接口", f"无法上传{label}到 AI 生成接口")) from exc
     url = result.get("url") if isinstance(result, dict) else ""
     if not url:
         raise RuntimeError(f"上传{label}未返回 URL：{json.dumps(result, ensure_ascii=False)[:800]}")
@@ -1951,27 +2000,9 @@ def mp4_atom_media_info(video: Path) -> dict | None:
         file_size = video.stat().st_size
     except OSError:
         return None
-    state: dict[str, object] = {"duration": 0.0, "sizes": []}
+    state: dict[str, object] = {"duration": 0.0, "tracks": []}
 
-    def parse_mvhd(payload: bytes) -> None:
-        if len(payload) < 20:
-            return
-        version = payload[0]
-        try:
-            if version == 1 and len(payload) >= 32:
-                timescale = int.from_bytes(payload[20:24], "big")
-                duration = int.from_bytes(payload[24:32], "big")
-            else:
-                timescale = int.from_bytes(payload[12:16], "big")
-                duration = int.from_bytes(payload[16:20], "big")
-            if timescale > 0 and duration > 0:
-                state["duration"] = max(float(state.get("duration") or 0), duration / timescale)
-        except Exception:
-            return
-
-    def parse_atoms(handle, start: int, end: int, depth: int = 0) -> None:
-        if depth > 8:
-            return
+    def atom_entries(handle, start: int, end: int):
         position = start
         while position + 8 <= end:
             try:
@@ -1995,12 +2026,147 @@ def mp4_atom_media_info(video: Path) -> dict | None:
             atom_end = position + size
             if size < header_size or atom_end > end or atom_end <= position:
                 return
-            payload_start = position + header_size
-            payload_size = atom_end - payload_start
+            yield atom_type, position + header_size, atom_end
+            position = atom_end
+
+    def parse_mvhd(payload: bytes) -> None:
+        if len(payload) < 20:
+            return
+        version = payload[0]
+        try:
+            if version == 1 and len(payload) >= 32:
+                timescale = int.from_bytes(payload[20:24], "big")
+                duration = int.from_bytes(payload[24:32], "big")
+            else:
+                timescale = int.from_bytes(payload[12:16], "big")
+                duration = int.from_bytes(payload[16:20], "big")
+            if timescale > 0 and duration > 0:
+                state["duration"] = max(float(state.get("duration") or 0), duration / timescale)
+        except Exception:
+            return
+
+    def parse_mdhd(payload: bytes, track: dict[str, object]) -> None:
+        if len(payload) < 20:
+            return
+        version = payload[0]
+        try:
+            if version == 1 and len(payload) >= 32:
+                timescale = int.from_bytes(payload[20:24], "big")
+                duration = int.from_bytes(payload[24:32], "big")
+            else:
+                timescale = int.from_bytes(payload[12:16], "big")
+                duration = int.from_bytes(payload[16:20], "big")
+            if timescale > 0:
+                track["timescale"] = timescale
+            if duration > 0:
+                track["duration"] = duration
+        except Exception:
+            return
+
+    def parse_hdlr(payload: bytes, track: dict[str, object]) -> None:
+        if len(payload) >= 12:
+            track["handler"] = payload[8:12].decode("latin1", errors="ignore")
+
+    def parse_stsd(payload: bytes, track: dict[str, object]) -> None:
+        if len(payload) < 16:
+            return
+        try:
+            entry_count = int.from_bytes(payload[4:8], "big")
+            position = 8
+            codecs = []
+            for _ in range(min(entry_count, 8)):
+                if position + 8 > len(payload):
+                    break
+                entry_size = int.from_bytes(payload[position:position + 4], "big")
+                codec = payload[position + 4:position + 8].decode("latin1", errors="ignore").strip()
+                if codec:
+                    codecs.append(codec)
+                if entry_size <= 0:
+                    break
+                position += entry_size
+            if codecs:
+                track["codec"] = codecs[0]
+        except Exception:
+            return
+
+    def parse_stts(payload: bytes, track: dict[str, object]) -> None:
+        if len(payload) < 16:
+            return
+        try:
+            entry_count = int.from_bytes(payload[4:8], "big")
+            position = 8
+            samples = 0
+            ticks = 0
+            for _ in range(min(entry_count, 20000)):
+                if position + 8 > len(payload):
+                    break
+                sample_count = int.from_bytes(payload[position:position + 4], "big")
+                sample_delta = int.from_bytes(payload[position + 4:position + 8], "big")
+                samples += sample_count
+                ticks += sample_count * sample_delta
+                position += 8
+            if samples > 0:
+                track["sampleCount"] = samples
+            if ticks > 0:
+                track["sampleTicks"] = ticks
+        except Exception:
+            return
+
+    def parse_tkhd(payload: bytes, track: dict[str, object]) -> None:
+        if len(payload) < 8:
+            return
+        fixed = payload[-8:]
+        width = int.from_bytes(fixed[:4], "big") / 65536
+        height = int.from_bytes(fixed[4:], "big") / 65536
+        if width >= 16 and height >= 16:
+            track["width"] = round(width)
+            track["height"] = round(height)
+
+    def parse_track(handle, start: int, end: int) -> dict[str, object]:
+        track: dict[str, object] = {}
+
+        def walk(track_start: int, track_end: int, depth: int = 0) -> None:
+            if depth > 8:
+                return
+            for atom_type, payload_start, atom_end in atom_entries(handle, track_start, track_end):
+                payload_size = atom_end - payload_start
+                try:
+                    if atom_type == "tkhd":
+                        handle.seek(payload_start)
+                        parse_tkhd(handle.read(min(payload_size, 128)), track)
+                    elif atom_type == "mdhd":
+                        handle.seek(payload_start)
+                        parse_mdhd(handle.read(min(payload_size, 128)), track)
+                    elif atom_type == "hdlr":
+                        handle.seek(payload_start)
+                        parse_hdlr(handle.read(min(payload_size, 128)), track)
+                    elif atom_type == "stsd":
+                        handle.seek(payload_start)
+                        parse_stsd(handle.read(min(payload_size, 4096)), track)
+                    elif atom_type == "stts":
+                        handle.seek(payload_start)
+                        parse_stts(handle.read(min(payload_size, 320000)), track)
+                    if atom_type in MP4_CONTAINER_ATOMS:
+                        walk(payload_start, atom_end, depth + 1)
+                except OSError:
+                    return
+
+        walk(start, end)
+        return track
+
+    def parse_atoms(handle, start: int, end: int, depth: int = 0) -> None:
+        if depth > 8:
+            return
+        for atom_type, payload_start, atom_end in atom_entries(handle, start, end):
             try:
+                payload_size = atom_end - payload_start
                 if atom_type == "mvhd":
                     handle.seek(payload_start)
                     parse_mvhd(handle.read(min(payload_size, 128)))
+                elif atom_type == "trak":
+                    track = parse_track(handle, payload_start, atom_end)
+                    if track:
+                        state.setdefault("tracks", []).append(track)
                 elif atom_type == "tkhd" and payload_size >= 8:
                     handle.seek(atom_end - 8)
                     fixed = handle.read(8)
@@ -2008,12 +2174,11 @@ def mp4_atom_media_info(video: Path) -> dict | None:
                         width = int.from_bytes(fixed[:4], "big") / 65536
                         height = int.from_bytes(fixed[4:], "big") / 65536
                         if width >= 16 and height >= 16:
-                            state.setdefault("sizes", []).append((round(width), round(height)))
+                            state.setdefault("tracks", []).append({"width": round(width), "height": round(height)})
                 elif atom_type in MP4_CONTAINER_ATOMS:
                     parse_atoms(handle, payload_start, atom_end, depth + 1)
             except OSError:
                 return
-            position = atom_end
 
     try:
         with video.open("rb") as handle:
@@ -2021,23 +2186,74 @@ def mp4_atom_media_info(video: Path) -> dict | None:
     except OSError:
         return None
 
-    sizes = [item for item in state.get("sizes", []) if isinstance(item, tuple)]
+    tracks = [item for item in state.get("tracks", []) if isinstance(item, dict)]
+    video_codecs = {"avc1", "avc3", "hvc1", "hev1", "mp4v", "encv", "vp09", "av01", "dvh1", "dvhe"}
+    audio_codecs = {"mp4a", "alac", "ac-3", "ec-3", "Opus", "enca", "fLaC"}
+    codec_names = {
+        "avc1": "h264",
+        "avc3": "h264",
+        "hvc1": "hevc",
+        "hev1": "hevc",
+        "mp4v": "mpeg4",
+        "mp4a": "aac",
+        "ac-3": "ac3",
+        "ec-3": "eac3",
+        "fLaC": "flac",
+    }
+    video_tracks = [
+        item for item in tracks
+        if item.get("handler") == "vide" or item.get("codec") in video_codecs or (item.get("width") and item.get("height"))
+    ]
+    audio_tracks = [
+        item for item in tracks
+        if item.get("handler") == "soun" or item.get("codec") in audio_codecs
+    ]
+    sizes = [
+        (int(item.get("width") or 0), int(item.get("height") or 0))
+        for item in video_tracks
+        if item.get("width") and item.get("height")
+    ]
     width, height = max(sizes, key=lambda item: item[0] * item[1]) if sizes else (0, 0)
     try:
         duration_seconds = float(state.get("duration") or 0)
     except (TypeError, ValueError):
         duration_seconds = 0.0
+    video_track = max(video_tracks, key=lambda item: int(item.get("width") or 0) * int(item.get("height") or 0), default={})
+    if duration_seconds <= 0:
+        try:
+            timescale = float(video_track.get("timescale") or 0)
+            duration = float(video_track.get("duration") or 0)
+            duration_seconds = duration / timescale if timescale > 0 and duration > 0 else 0.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            duration_seconds = 0.0
+    fps = "未知"
+    try:
+        timescale = float(video_track.get("timescale") or 0)
+        sample_count = float(video_track.get("sampleCount") or 0)
+        sample_ticks = float(video_track.get("sampleTicks") or 0)
+        if timescale > 0 and sample_count > 0 and sample_ticks > 0:
+            fps = fps_label(sample_count * timescale / sample_ticks)
+        elif sample_count > 0 and duration_seconds > 0:
+            fps = fps_label(sample_count / duration_seconds)
+    except (TypeError, ValueError, ZeroDivisionError):
+        fps = "未知"
+    video_codec_raw = str(video_track.get("codec") or video.suffix.lower().lstrip(".") or "mp4")
+    video_codec = codec_names.get(video_codec_raw, video_codec_raw)
+    audio_track = audio_tracks[0] if audio_tracks else {}
+    audio_codec_raw = str(audio_track.get("codec") or "").strip()
+    audio_codec = codec_names.get(audio_codec_raw, audio_codec_raw)
+    audio_label = audio_codec or ("已检测到" if audio_track else "未检测到")
     if duration_seconds <= 0 and not (width and height):
         return None
     bitrate = int(file_size * 8 / duration_seconds) if duration_seconds > 0 else 0
     return {
         "duration": seconds_to_clock(duration_seconds) if duration_seconds > 0 else "未知",
         "durationSeconds": duration_seconds,
-        "video": video.suffix.lower().lstrip(".") or "mp4",
-        "audio": "未检测到",
+        "video": video_codec,
+        "audio": audio_label,
         "resolution": f"{width}x{height}" if width and height else "未知",
         "ratio": ratio_label(width, height, {}),
-        "fps": "未知",
+        "fps": fps,
         "bitrate": bitrate_label(bitrate),
     }
 
@@ -2058,6 +2274,18 @@ def probe_media_info(video: Path) -> dict:
     if atom_info and atom_info.get("durationSeconds") and not merged.get("durationSeconds"):
         merged["durationSeconds"] = atom_info.get("durationSeconds")
     return merged
+
+
+def read_video_duration(video: Path, task_id: str | None = None) -> float:
+    try:
+        info = probe_media_info(video)
+        duration = float(info.get("durationSeconds") or 0)
+        if duration > 0:
+            return duration
+    except Exception:
+        pass
+    duration = read_video_duration(video, task_id=task_id)
+    return duration
 
 
 def seconds_to_clock(value: float) -> str:
@@ -2396,10 +2624,7 @@ def build_highlight_analysis(video: Path, task_id: str | None = None) -> dict:
 
     if task_id:
         task_update(task_id, 6, "正在读取视频信息")
-    probe = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=120, task_id=task_id)
-    duration = parse_duration_seconds(probe.stderr)
-    if duration <= 0:
-        raise RuntimeError(f"无法读取视频时长，请确认 ffmpeg 可用且视频文件能正常打开。{command_tail(probe, 500)}")
+    duration = read_video_duration(video, task_id=task_id)
 
     fps = 2
     pattern = out_dir / "frame_%06d.jpg"

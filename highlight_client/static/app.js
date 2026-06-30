@@ -1048,6 +1048,16 @@ function tauriInvoke() {
   return null;
 }
 
+function withTimeout(promise, ms, message) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) window.clearTimeout(timer);
+  });
+}
+
 async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
   const invoke = tauriInvoke();
   if (!invoke) {
@@ -1055,9 +1065,13 @@ async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
     return;
   }
   if (checkUpdateBtn) checkUpdateBtn.disabled = true;
-  if (!silent && updateState) updateState.textContent = "正在检查更新...";
+  if (!silent && updateState) updateState.textContent = "正在检查更新，请稍候...";
   try {
-    const version = await invoke("check_for_update");
+    const version = await withTimeout(
+      invoke("check_for_update"),
+      30000,
+      "检查更新超时，请确认当前网络可以访问 GitHub Release 后重试。"
+    );
     if (!version) {
       if (!silent && updateState) updateState.textContent = "当前已是最新版本";
       return;
@@ -1070,7 +1084,11 @@ async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
       }
     }
     if (!silent && updateState) updateState.textContent = `正在下载并安装 v${version}...`;
-    const message = await invoke("install_update_if_available");
+    const message = await withTimeout(
+      invoke("install_update_if_available"),
+      300000,
+      "下载或安装更新超时，请稍后重试，或手动下载安装包。"
+    );
     if (!silent && updateState) updateState.textContent = message || "更新已安装，正在重启";
   } catch (error) {
     if (!silent && updateState) updateState.textContent = `检查更新失败：${error?.message || error}`;
