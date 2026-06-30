@@ -179,6 +179,12 @@ async fn install_update_if_available(app: tauri::AppHandle) -> Result<String, St
         return Ok("当前已是最新版本".to_string());
     };
 
+    let pid = app
+        .try_state::<ServerState>()
+        .and_then(|state| state.sidecar_pid.lock().ok().and_then(|pid| *pid));
+    stop_server_on_exit(pid, SERVER_PORT);
+    std::thread::sleep(Duration::from_millis(800));
+
     update
         .download_and_install(|_, _| {}, || {})
         .await

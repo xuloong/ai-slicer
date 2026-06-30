@@ -43,6 +43,30 @@ DEV_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", DEV_ROOT))
 
 
+def bundled_ffmpeg_candidates() -> list[Path]:
+    ffmpeg_name = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
+    candidates = [
+        RESOURCE_ROOT / "ffmpeg-tools" / ffmpeg_name,
+        DEV_ROOT / "ffmpeg-tools" / ffmpeg_name,
+    ]
+    try:
+        executable_dir = Path(getattr(sys, "executable", "")).resolve().parent
+        candidates.append(executable_dir / "ffmpeg-tools" / ffmpeg_name)
+    except Exception:
+        pass
+    return candidates
+
+
+def configure_bundled_ffmpeg_env() -> None:
+    for candidate in bundled_ffmpeg_candidates():
+        if candidate.is_file():
+            os.environ["IMAGEIO_FFMPEG_EXE"] = str(candidate)
+            return
+
+
+configure_bundled_ffmpeg_env()
+
+
 def app_version() -> str:
     if os.environ.get("APP_VERSION"):
         return os.environ["APP_VERSION"].strip()
@@ -835,16 +859,7 @@ def notify_generation_asset(feature: str, prompt: str, params: dict, storage: di
 
 
 def detect_ffmpeg_path() -> str | None:
-    ffmpeg_name = "ffmpeg.exe" if is_windows() else "ffmpeg"
-    candidates = [
-        RESOURCE_ROOT / "ffmpeg-tools" / ffmpeg_name,
-        DEV_ROOT / "ffmpeg-tools" / ffmpeg_name,
-    ]
-    try:
-        candidates.append(Path(getattr(sys, "executable", "")).resolve().parent / "ffmpeg-tools" / ffmpeg_name)
-    except Exception:
-        pass
-    for candidate in candidates:
+    for candidate in bundled_ffmpeg_candidates():
         if candidate.is_file():
             return str(candidate)
     if imageio_ffmpeg is not None:
@@ -2284,8 +2299,11 @@ def read_video_duration(video: Path, task_id: str | None = None) -> float:
             return duration
     except Exception:
         pass
-    duration = read_video_duration(video, task_id=task_id)
-    return duration
+    result = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=120, task_id=task_id)
+    duration = parse_duration_seconds(result.stderr)
+    if duration > 0:
+        return duration
+    raise RuntimeError(f"无法读取视频时长，请确认 ffmpeg 可用且视频文件能正常打开。{command_tail(result, 500)}")
 
 
 def seconds_to_clock(value: float) -> str:
@@ -4150,10 +4168,7 @@ def generate_thumbnails(video: Path, interval: int, task_id: str | None = None) 
     job = uuid.uuid4().hex[:10]
     out_dir = WORK / job
     out_dir.mkdir(parents=True, exist_ok=True)
-    probe = run([ffmpeg_path(), "-hide_banner", "-i", str(video)], timeout=120, task_id=task_id)
-    duration = parse_duration_seconds(probe.stderr)
-    if duration <= 0:
-        raise RuntimeError(f"无法读取视频时长，请确认 ffmpeg 可用且视频文件能正常打开。{command_tail(probe, 500)}")
+    duration = read_video_duration(video, task_id=task_id)
 
     times = [float(value) for value in range(0, max(1, int(duration)), interval)]
     if not times:

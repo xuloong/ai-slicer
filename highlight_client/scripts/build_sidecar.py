@@ -119,8 +119,26 @@ def detect_tool(env_name: str, executable: str) -> Path | None:
     return None
 
 
+def resolve_chocolatey_ffmpeg(candidate: Path) -> Path:
+    if os.name != "nt":
+        return candidate
+    normalized = str(candidate).replace("\\", "/").lower()
+    if "/chocolatey/bin/ffmpeg.exe" not in normalized:
+        return candidate
+    roots = []
+    if os.environ.get("ChocolateyInstall"):
+        roots.append(Path(os.environ["ChocolateyInstall"]))
+    roots.append(Path(os.environ.get("ProgramData", "C:/ProgramData")) / "chocolatey")
+    for root in roots:
+        real = root / "lib" / "ffmpeg" / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
+        if real.exists():
+            return real
+    return candidate
+
+
 def detect_ffmpeg() -> Path | None:
-    return detect_tool("FFMPEG_PATH", "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    detected = detect_tool("FFMPEG_PATH", "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    return resolve_chocolatey_ffmpeg(detected) if detected else None
 
 
 def ensure_whisper_model() -> Path | None:
@@ -197,8 +215,6 @@ def main() -> None:
     command.extend([
         "--collect-data",
         "certifi",
-        "--collect-binaries",
-        "imageio_ffmpeg",
         "--collect-all",
         "yt_dlp",
         "--collect-all",
