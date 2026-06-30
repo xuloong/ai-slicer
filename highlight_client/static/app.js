@@ -14,6 +14,7 @@ const logoutBtn = $("logoutBtn");
 const appVersion = $("appVersion");
 const settingsVersion = $("settingsVersion");
 const checkUpdateBtn = $("checkUpdateBtn");
+const installUpdateBtn = $("installUpdateBtn");
 const updateState = $("updateState");
 const exportDiagnosticsBtn = $("exportDiagnosticsBtn");
 const stopLocalServerBtn = $("stopLocalServerBtn");
@@ -111,6 +112,12 @@ let authPollTimer = 0;
 let sessionCheckTimer = 0;
 let wecomLoginInstance = null;
 let autoUpdateChecked = false;
+let pendingUpdateVersion = "";
+
+const UPDATE_POLICY = {
+  minSupportedVersion: "",
+  criticalVersions: [],
+};
 
 function isCreativeStoryboardSource() {
   return storyboardSourceName === "创作分镜脚本";
@@ -1058,7 +1065,69 @@ function withTimeout(promise, ms, message) {
   });
 }
 
-async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
+function parseVersionParts(version) {
+  return String(version || "")
+    .replace(/^v/i, "")
+    .split(/[.-]/)
+    .map((part) => Number.parseInt(part, 10))
+    .map((value) => (Number.isFinite(value) ? value : 0));
+}
+
+function compareVersions(left, right) {
+  const a = parseVersionParts(left);
+  const b = parseVersionParts(right);
+  const length = Math.max(a.length, b.length, 3);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (a[index] || 0) - (b[index] || 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+function currentAppVersion() {
+  const text = appVersion?.textContent || settingsVersion?.textContent || "";
+  const match = text.match(/v?(\d+\.\d+\.\d+)/i);
+  return match ? match[1] : "";
+}
+
+function isForceUpdateVersion(version) {
+  const current = currentAppVersion();
+  if (UPDATE_POLICY.minSupportedVersion && current && compareVersions(current, UPDATE_POLICY.minSupportedVersion) < 0) {
+    return true;
+  }
+  return UPDATE_POLICY.criticalVersions.includes(String(version || "").replace(/^v/i, ""));
+}
+
+function setPendingUpdate(version) {
+  pendingUpdateVersion = String(version || "").replace(/^v/i, "");
+  if (installUpdateBtn) installUpdateBtn.hidden = !pendingUpdateVersion;
+}
+
+async function installPendingUpdate(version = pendingUpdateVersion) {
+  const invoke = tauriInvoke();
+  if (!invoke) {
+    if (updateState) updateState.textContent = "自动更新仅在安装后的客户端中可用。";
+    return;
+  }
+  const targetVersion = String(version || pendingUpdateVersion || "").replace(/^v/i, "");
+  if (checkUpdateBtn) checkUpdateBtn.disabled = true;
+  if (installUpdateBtn) installUpdateBtn.disabled = true;
+  if (updateState) updateState.textContent = targetVersion ? `正在下载并安装 v${targetVersion}...` : "正在下载并安装更新...";
+  try {
+    const message = await withTimeout(
+      invoke("install_update_if_available"),
+      300000,
+      "下载或安装更新超时，请稍后重试，或手动下载安装包。"
+    );
+    if (updateState) updateState.textContent = message || "更新已安装，正在重启";
+  } catch (error) {
+    if (updateState) updateState.textContent = `安装更新失败：${error?.message || error}`;
+    if (checkUpdateBtn) checkUpdateBtn.disabled = false;
+    if (installUpdateBtn) installUpdateBtn.disabled = false;
+  }
+}
+
+async function checkForAppUpdate({ silent = false, promptOnFound = false } = {}) {
   const invoke = tauriInvoke();
   if (!invoke) {
     if (!silent && updateState) updateState.textContent = "自动更新仅在安装后的客户端中可用。";
@@ -1073,23 +1142,27 @@ async function checkForAppUpdate({ silent = false, autoInstall = false } = {}) {
       "检查更新超时，请确认当前网络可以访问 GitHub Release 后重试。"
     );
     if (!version) {
+      setPendingUpdate("");
       if (!silent && updateState) updateState.textContent = "当前已是最新版本";
       return;
     }
-    if (!autoInstall) {
-      const shouldInstall = window.confirm(`发现新版本 v${version}，是否现在更新？`);
-      if (!shouldInstall) {
-        if (updateState) updateState.textContent = `发现新版本 v${version}，稍后可在设置中更新。`;
-        return;
-      }
+    setPendingUpdate(version);
+    const forceUpdate = isForceUpdateVersion(version);
+    if (updateState) updateState.textContent = forceUpdate
+      ? `发现关键更新 v${version}，需要更新后继续使用。`
+      : `发现新版本 v${version}，可在设置中点击“立即更新”。`;
+    if (forceUpdate) {
+      window.alert(`发现关键更新 v${version}，需要更新后继续使用。`);
+      openSettings();
+      return;
     }
-    if (!silent && updateState) updateState.textContent = `正在下载并安装 v${version}...`;
-    const message = await withTimeout(
-      invoke("install_update_if_available"),
-      300000,
-      "下载或安装更新超时，请稍后重试，或手动下载安装包。"
-    );
-    if (!silent && updateState) updateState.textContent = message || "更新已安装，正在重启";
+    if (promptOnFound) {
+      window.setTimeout(() => {
+        if (window.confirm(`发现新版本 v${version}，是否现在更新？`)) {
+          installPendingUpdate(version);
+        }
+      }, 100);
+    }
   } catch (error) {
     if (!silent && updateState) updateState.textContent = `检查更新失败：${error?.message || error}`;
   } finally {
@@ -1101,7 +1174,7 @@ function scheduleAutoUpdateCheck() {
   if (autoUpdateChecked) return;
   autoUpdateChecked = true;
   window.setTimeout(() => {
-    checkForAppUpdate({ silent: true, autoInstall: true });
+    checkForAppUpdate({ silent: true, promptOnFound: true });
   }, 2500);
 }
 
@@ -1423,6 +1496,10 @@ $("pickFfmpegBtn").addEventListener("click", async () => {
 
 checkUpdateBtn?.addEventListener("click", () => {
   checkForAppUpdate({ silent: false });
+});
+
+installUpdateBtn?.addEventListener("click", () => {
+  installPendingUpdate();
 });
 
 exportDiagnosticsBtn?.addEventListener("click", async () => {
